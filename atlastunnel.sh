@@ -2,9 +2,6 @@
 
 set -e
 
-LOG_FILE="/var/log/l2tp_vpn_setup.log"
-exec 2>>$LOG_FILE
-
 check_server_installed() {
     if [ -f /etc/ipsec.conf ] && [ -f /etc/xl2tpd/xl2tpd.conf ] && [ -f /etc/ppp/chap-secrets ]; then
         return 0
@@ -52,13 +49,11 @@ add_user() {
 }
 
 setup_user() {
-    exec 2>/dev/tty
     echo -n "Введите имя пользователя для VPN: "
     read VPN_USER
     echo -n "Введите пароль для VPN: "
     read -s VPN_PASSWORD
     echo
-    exec 2>>$LOG_FILE
 
     add_user "$VPN_USER" "$VPN_PASSWORD"
 }
@@ -181,9 +176,9 @@ if check_server_installed; then
     VPN_SERVER_IP=$(hostname -I | awk '{print $1}')
     VPN_IPSEC_PSK=$(grep -oP '(?<=: PSK ").*?(?=")' /etc/ipsec.secrets)
     show_configuration
-    echo "Обнаружена установленная конфигурация VPN сервера. Выберите действие:"
+    echo "Выберите действие:"
     echo "1) Удалить сервер"
-    echo "2) Добавить нового клиента"
+    echo "2) Добавить нового пользователя"
     echo "3) Показать список пользователей"
     read -p "Ваш выбор (1-3): " CHOICE
 
