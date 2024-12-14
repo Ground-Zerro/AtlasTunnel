@@ -5,21 +5,21 @@ set -e
 LOG_FILE="/var/log/l2tp_vpn_setup.log"
 exec 2>>$LOG_FILE
 
-# Функция проверки установленного сервера
 check_server_installed() {
-    [ -f /etc/ipsec.conf ] && [ -f /etc/xl2tpd/xl2tpd.conf ] && [ -f /etc/ppp/chap-secrets ]
+    if [ -f /etc/ipsec.conf ] && [ -f /etc/xl2tpd/xl2tpd.conf ] && [ -f /etc/ppp/chap-secrets ]; then
+        return 0
+    else
+        return 1
+    fi
 }
 
-# Функция проверки и установки пакетов
 install_packages() {
-    echo "Проверка и установка необходимых пакетов..."
     REQUIRED_PACKAGES=(strongswan xl2tpd ppp lsof iptables iptables-persistent libstrongswan-standard-plugins libcharon-extra-plugins dialog unbound)
 
-    apt update
+    apt update -o Dir::Etc::sourcelist="sources.list" -o Dir::Etc::sourceparts="-" -o APT::Get::List-Cleanup="0"
 
     for PACKAGE in "${REQUIRED_PACKAGES[@]}"; do
         if ! dpkg -l | grep -qw "$PACKAGE"; then
-            echo "Установка $PACKAGE..."
             apt install -y "$PACKAGE" || {
                 echo "Ошибка: не удалось установить $PACKAGE. Проверьте подключение к интернету или репозитории."
                 exit 1
@@ -30,17 +30,14 @@ install_packages() {
     done
 }
 
-# Функция для удаления сервера
 remove_server() {
-    echo "Удаление VPN сервера..."
     systemctl stop strongswan xl2tpd unbound || true
     systemctl disable strongswan xl2tpd unbound || true
-    apt purge -y strongswan xl2tpd ppp lsof iptables-persistent unbound || true
+    apt remove -y strongswan xl2tpd ppp lsof iptables-persistent unbound || true
     rm -rf /etc/ipsec.conf /etc/ipsec.secrets /etc/xl2tpd /etc/ppp/options.xl2tpd /etc/ppp/chap-secrets /etc/unbound/unbound.conf.d/dot.conf || true
     echo "VPN сервер успешно удалён."
 }
 
-# Функция для добавления нового пользователя
 add_user() {
     local USERNAME=$1
     local PASSWORD=$2
@@ -50,26 +47,28 @@ add_user() {
         return 1
     fi
 
-    echo "$USERNAME l2tpd $PASSWORD *" >> /etc/ppp/chap-secrets
+    echo "$USERNAME       l2tpd   $PASSWORD          *" >> /etc/ppp/chap-secrets
     echo "Пользователь $USERNAME успешно добавлен."
 }
 
-# Функция настройки и создания пользователя
 setup_user() {
+    exec 2>/dev/tty
     echo -n "Введите имя пользователя для VPN: "
     read VPN_USER
     echo -n "Введите пароль для VPN: "
     read -s VPN_PASSWORD
     echo
+    exec 2>>$LOG_FILE
+
     add_user "$VPN_USER" "$VPN_PASSWORD"
 }
 
-# Функция настройки сервера
 setup_server() {
     install_packages
 
     VPN_IPSEC_PSK=$(tr -dc 'a-zA-Z' < /dev/urandom | head -c6)
-    VPN_SERVER_IP=$(ip -4 addr show dev eth0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
+
+    VPN_SERVER_IP=$(hostname -I | awk '{print $1}')
 
     cat > /etc/ipsec.conf <<EOF
 config setup
@@ -137,14 +136,19 @@ server:
         forward-addr: 149.112.112.112@853
 EOF
 
-    systemctl restart unbound || echo "Unbound не настроен."
+    if systemctl is-enabled --quiet unbound; then
+        systemctl restart unbound
+    else
+        echo "Сервис Unbound не найден. Пропускаем перезапуск."
+    fi
+
     sysctl -w net.ipv4.ip_forward=1
     sed -i '/net.ipv4.ip_forward/d' /etc/sysctl.conf
     echo "net.ipv4.ip_forward = 1" >> /etc/sysctl.conf
 
-    iptables -t nat -C POSTROUTING -o eth0 -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
-    iptables -C FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
-    iptables -C FORWARD -s 10.10.10.0/24 -j ACCEPT 2>/dev/null || iptables -A FORWARD -s 10.10.10.0/24 -j ACCEPT
+    iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+    iptables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
+    iptables -A FORWARD -s 10.10.10.0/24 -j ACCEPT
 
     netfilter-persistent save
 
@@ -152,62 +156,50 @@ EOF
     systemctl restart strongswan xl2tpd
 
     echo "VPN сервер успешно настроен."
+    echo "Данные для подключения:"
     echo "Сервер: $VPN_SERVER_IP"
     echo "IPSec PSK: $VPN_IPSEC_PSK"
 }
 
-list_users() {
-    echo "Список пользователей:"
-    awk '/^[^#]/ {print NR ") Логин: "$1", Пароль: "$3}' /etc/ppp/chap-secrets
+show_configuration() {
+    echo "Данные для подключения:"
+    echo "Сервер: $VPN_SERVER_IP"
+    echo "IPSec PSK: $VPN_IPSEC_PSK"
 }
 
-delete_user() {
-    echo "Выберите пользователя для удаления:"
-    mapfile -t USERS < <(awk '/^[^#]/ {print $1}' /etc/ppp/chap-secrets)
-
-    for i in "${!USERS[@]}"; do
-        echo "$((i+1))) ${USERS[$i]}"
-    done
-
-    echo "0) Отмена"
-    read -p "Ваш выбор: " CHOICE
-
-    if [[ "$CHOICE" -eq 0 ]]; then
-        echo "Отмена удаления."
-    elif [[ "$CHOICE" -gt 0 && "$CHOICE" -le "${#USERS[@]}" ]]; then
-        sed -i "/^${USERS[$CHOICE-1]} /d" /etc/ppp/chap-secrets
-        echo "Пользователь ${USERS[$CHOICE-1]} удалён."
+show_users() {
+    if [ -f /etc/ppp/chap-secrets ]; then
+        echo "Список пользователей:"
+        awk -F'[: ]+' '!/^#/ && NF >= 3 {print $1 " - " $3}' /etc/ppp/chap-secrets
     else
-        echo "Неверный выбор."
+        echo "Ошибка: файл /etc/ppp/chap-secrets не найден."
     fi
 }
 
+
 if check_server_installed; then
+    VPN_SERVER_IP=$(hostname -I | awk '{print $1}')
+    VPN_IPSEC_PSK=$(grep -oP '(?<=: PSK ").*?(?=")' /etc/ipsec.secrets)
+    show_configuration
     echo "Обнаружена установленная конфигурация VPN сервера. Выберите действие:"
-    echo "1) Переустановить сервер"
-    echo "2) Удалить сервер"
-    echo "3) Добавить нового клиента"
-    echo "4) Список пользователей"
-    echo "5) Удалить пользователя"
-    read -p "Ваш выбор (1-5): " CHOICE
+    echo "1) Удалить сервер"
+    echo "2) Добавить нового клиента"
+    echo "3) Показать список пользователей"
+    read -p "Ваш выбор (1-3): " CHOICE
 
     case $CHOICE in
         1)
             remove_server
-            setup_server
             ;;
+
         2)
-            remove_server
-            ;;
-        3)
             setup_user
             ;;
-        4)
-            list_users
+
+        3)
+            show_users
             ;;
-        5)
-            delete_user
-            ;;
+
         *)
             echo "Неверный выбор. Завершение работы."
             exit 1
