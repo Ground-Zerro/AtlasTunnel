@@ -1,7 +1,5 @@
 #!/bin/bash
 
-set -e
-
 check_server_installed() {
     if [ -f /etc/ipsec.conf ] && [ -f /etc/xl2tpd/xl2tpd.conf ] && [ -f /etc/ppp/chap-secrets ]; then
         return 0
