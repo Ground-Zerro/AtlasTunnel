@@ -68,12 +68,15 @@ if check_server_installed; then
             echo "Переустановка сервера..."
             remove_server
             ;;
+
         2)
             remove_server
             ;;
+
         3)
             add_client
             ;;
+
         *)
             echo "Неверный выбор. Завершение работы."
             exit 1
@@ -192,6 +195,7 @@ netfilter-persistent save
 systemctl enable strongswan xl2tpd
 systemctl restart strongswan xl2tpd
 
+# Вывод информации о конфигурации
 echo "VPN сервер успешно настроен."
 echo "Данные для подключения:"
 echo "Сервер: $VPN_SERVER_IP"
