@@ -42,64 +42,48 @@ remove_server() {
     apt remove -y strongswan xl2tpd ppp lsof iptables-persistent unbound || true
     rm -rf /etc/ipsec.conf /etc/ipsec.secrets /etc/xl2tpd /etc/ppp/options.xl2tpd /etc/ppp/chap-secrets /etc/unbound/unbound.conf.d/dot.conf || true
     echo "VPN сервер успешно удалён."
-    exit 0
 }
 
-# Функция для добавления нового клиента
-add_client() {
-    read -p "Введите имя нового пользователя для VPN: " NEW_USER
-    read -s -p "Введите пароль для нового пользователя: " NEW_PASSWORD
+# Функция для добавления нового пользователя
+add_user() {
+    local USERNAME=$1
+    local PASSWORD=$2
+
+    if [ -z "$USERNAME" ] || [ -z "$PASSWORD" ]; then
+        echo "Ошибка: Имя пользователя или пароль не указаны."
+        return 1
+    fi
+
+    echo "$USERNAME       l2tpd   $PASSWORD          *" >> /etc/ppp/chap-secrets
+    echo "Пользователь $USERNAME успешно добавлен."
+}
+
+# Функция настройки и создания пользователя
+setup_user() {
+    # Запрос имени пользователя и пароля
+    exec 2>/dev/tty  # Отключаем вывод в лог
+    echo -n "Введите имя пользователя для VPN: "
+    read VPN_USER
+    echo -n "Введите пароль для VPN: "
+    read -s VPN_PASSWORD
     echo
-    echo "$NEW_USER       l2tpd   $NEW_PASSWORD          *" >> /etc/ppp/chap-secrets
-    echo "Пользователь $NEW_USER успешно добавлен."
-    exit 0
+    exec 2>>$LOG_FILE  # Включаем вывод в лог обратно
+
+    add_user "$VPN_USER" "$VPN_PASSWORD"
 }
 
-# Проверка на установленный сервер
-if check_server_installed; then
-    echo "Обнаружена установленная конфигурация VPN сервера. Выберите действие:"
-    echo "1) Переустановить сервер"
-    echo "2) Удалить сервер"
-    echo "3) Добавить нового клиента"
-    read -p "Ваш выбор (1-3): " CHOICE
+# Функция настройки сервера
+setup_server() {
+    install_packages
 
-    case $CHOICE in
-        1)
-            echo "Переустановка сервера..."
-            remove_server
-            ;;
+    # Генерация случайного IPSec PSK
+    VPN_IPSEC_PSK=$(tr -dc 'a-zA-Z' < /dev/urandom | head -c6)
 
-        2)
-            remove_server
-            ;;
+    # Определение IP-адреса сервера
+    VPN_SERVER_IP=$(hostname -I | awk '{print $1}')
 
-        3)
-            add_client
-            ;;
-
-        *)
-            echo "Неверный выбор. Завершение работы."
-            exit 1
-            ;;
-    esac
-fi
-
-# Установка необходимых пакетов
-install_packages
-
-# Запрос имени пользователя и пароля
-read -p "Введите имя пользователя для VPN: " VPN_USER
-read -s -p "Введите пароль для VPN: " VPN_PASSWORD
-echo
-
-# Генерация случайного IPSec PSK
-VPN_IPSEC_PSK=$(tr -dc 'a-zA-Z' < /dev/urandom | head -c6)
-
-# Определение IP-адреса сервера
-VPN_SERVER_IP=$(hostname -I | awk '{print $1}')
-
-# Настройка IPsec
-cat > /etc/ipsec.conf <<EOF
+    # Настройка IPsec
+    cat > /etc/ipsec.conf <<EOF
 config setup
     uniqueids=never
 conn L2TP-PSK
@@ -116,12 +100,12 @@ conn L2TP-PSK
     rightprotoport=17/1701
 EOF
 
-cat > /etc/ipsec.secrets <<EOF
+    cat > /etc/ipsec.secrets <<EOF
 : PSK "$VPN_IPSEC_PSK"
 EOF
 
-# Настройка xl2tpd
-cat > /etc/xl2tpd/xl2tpd.conf <<EOF
+    # Настройка xl2tpd
+    cat > /etc/xl2tpd/xl2tpd.conf <<EOF
 [global]
 port = 1701
 [lns default]
@@ -135,7 +119,7 @@ pppoptfile = /etc/ppp/options.xl2tpd
 length bit = yes
 EOF
 
-cat > /etc/ppp/options.xl2tpd <<EOF
+    cat > /etc/ppp/options.xl2tpd <<EOF
 require-mschap-v2
 ms-dns 127.0.0.1
 asyncmap 0
@@ -151,9 +135,9 @@ lcp-echo-interval 30
 lcp-echo-failure 4
 EOF
 
-# Настройка Unbound для DoT
-mkdir -p /etc/unbound/unbound.conf.d
-cat > /etc/unbound/unbound.conf.d/dot.conf <<EOF
+    # Настройка Unbound для DoT
+    mkdir -p /etc/unbound/unbound.conf.d
+    cat > /etc/unbound/unbound.conf.d/dot.conf <<EOF
 server:
     interface: 127.0.0.1
     access-control: 127.0.0.1/32 allow
@@ -167,38 +151,77 @@ server:
         forward-addr: 149.112.112.112@853  # Quad9
 EOF
 
-# Перезапуск Unbound
-systemctl enable unbound
-systemctl restart unbound
+    # Проверка наличия и перезапуск сервиса Unbound
+    if systemctl is-enabled --quiet unbound; then
+        systemctl restart unbound
+    else
+        echo "Сервис Unbound не найден. Пропускаем перезапуск."
+    fi
 
-# Создание учетной записи пользователя VPN
-cat > /etc/ppp/chap-secrets <<EOF
-# Secrets for authentication using CHAP
-# client        server  secret                  IP addresses
-$VPN_USER       l2tpd   $VPN_PASSWORD          *
-EOF
+    # Включение пересылки IP
+    sysctl -w net.ipv4.ip_forward=1
+    sed -i '/net.ipv4.ip_forward/d' /etc/sysctl.conf
+    echo "net.ipv4.ip_forward = 1" >> /etc/sysctl.conf
 
-# Включение пересылки IP
-sysctl -w net.ipv4.ip_forward=1
-sed -i '/net.ipv4.ip_forward/d' /etc/sysctl.conf
-echo "net.ipv4.ip_forward = 1" >> /etc/sysctl.conf
+    # Настройка брандмауэра
+    iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+    iptables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
+    iptables -A FORWARD -s 10.10.10.0/24 -j ACCEPT
 
-# Настройка брандмауэра
-iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
-iptables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
-iptables -A FORWARD -s 10.10.10.0/24 -j ACCEPT
+    # Сохранение правил iptables
+    netfilter-persistent save
 
-# Сохранение правил iptables
-netfilter-persistent save
+    # Перезапуск служб
+    systemctl enable strongswan xl2tpd
+    systemctl restart strongswan xl2tpd
 
-# Перезапуск служб
-systemctl enable strongswan xl2tpd
-systemctl restart strongswan xl2tpd
+    echo "VPN сервер успешно настроен."
+    echo "Данные для подключения:"
+    echo "Сервер: $VPN_SERVER_IP"
+    echo "IPSec PSK: $VPN_IPSEC_PSK"
+}
 
-# Вывод информации о конфигурации
-echo "VPN сервер успешно настроен."
-echo "Данные для подключения:"
-echo "Сервер: $VPN_SERVER_IP"
-echo "IPSec PSK: $VPN_IPSEC_PSK"
-echo "Пользователь: $VPN_USER"
-echo "Пароль: $VPN_PASSWORD"
+# Функция отображения списка пользователей
+list_users() {
+    echo "Список пользователей:"
+    awk '/^[^#]/ {print "Логин: "$1", Пароль: "$3}' /etc/ppp/chap-secrets
+}
+
+# Основной блок
+if check_server_installed; then
+    echo "Обнаружена установленная конфигурация VPN сервера. Выберите действие:"
+    echo "1) Переустановить сервер"
+    echo "2) Удалить сервер"
+    echo "3) Добавить нового клиента"
+    echo "4) Список пользователей"
+    read -p "Ваш выбор (1-4): " CHOICE
+
+    case $CHOICE in
+        1)
+            echo "Переустановка сервера..."
+            remove_server
+            setup_server
+            setup_user
+            ;;
+
+        2)
+            remove_server
+            ;;
+
+        3)
+            setup_user
+            ;;
+
+        4)
+            list_users
+            ;;
+
+        *)
+            echo "Неверный выбор. Завершение работы."
+            exit 1
+            ;;
+    esac
+else
+    setup_server
+    setup_user
+fi
