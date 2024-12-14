@@ -1,7 +1,7 @@
 #!/bin/bash
 
 check_server_installed() {
-    if [ -f /etc/ipsec.conf ] && [ -f /etc/xl2tpd/xl2tpd.conf ] && [ -f /etc/ppp/chap-secrets ]; then
+    if [ -f /etc/ipsec.conf ] && [ -f /etc/ppp/chap-secrets ]; then
         return 0
     else
         return 1
@@ -9,7 +9,7 @@ check_server_installed() {
 }
 
 install_packages() {
-    REQUIRED_PACKAGES=(strongswan xl2tpd ppp lsof iptables iptables-persistent libstrongswan-standard-plugins libcharon-extra-plugins dialog unbound)
+    REQUIRED_PACKAGES=(strongswan ppp lsof iptables iptables-persistent libstrongswan-standard-plugins libcharon-extra-plugins dialog unbound)
 
     apt update -o Dir::Etc::sourcelist="sources.list" -o Dir::Etc::sourceparts="-" -o APT::Get::List-Cleanup="0"
 
@@ -26,10 +26,10 @@ install_packages() {
 }
 
 remove_server() {
-    systemctl stop strongswan xl2tpd unbound || true
-    systemctl disable strongswan xl2tpd unbound || true
-    apt remove -y strongswan xl2tpd ppp lsof iptables-persistent unbound || true
-    rm -rf /etc/ipsec.conf /etc/ipsec.secrets /etc/xl2tpd /etc/ppp/options.xl2tpd /etc/ppp/chap-secrets /etc/unbound/unbound.conf.d/dot.conf || true
+    systemctl stop strongswan unbound || true
+    systemctl disable strongswan unbound || true
+    apt remove -y strongswan ppp lsof iptables-persistent unbound || true
+    rm -rf /etc/ipsec.conf /etc/ipsec.secrets /etc/ppp/options.xl2tpd /etc/ppp/chap-secrets /etc/unbound/unbound.conf.d/dot.conf || true
     echo "VPN сервер успешно удалён."
 }
 
@@ -42,7 +42,7 @@ add_user() {
         return 1
     fi
 
-    echo "$USERNAME       l2tpd   $PASSWORD          *" >> /etc/ppp/chap-secrets
+    echo "$USERNAME       *       $PASSWORD          *" >> /etc/ppp/chap-secrets
     echo "Пользователь $USERNAME успешно добавлен."
 }
 
@@ -84,21 +84,7 @@ EOF
 : PSK "$VPN_IPSEC_PSK"
 EOF
 
-    cat > /etc/xl2tpd/xl2tpd.conf <<EOF
-[global]
-port = 1701
-[lns default]
-ip range = 10.10.10.2-10.10.10.20
-local ip = 10.10.10.1
-require chap = yes
-refuse pap = yes
-require authentication = yes
-ppp debug = yes
-pppoptfile = /etc/ppp/options.xl2tpd
-length bit = yes
-EOF
-
-    cat > /etc/ppp/options.xl2tpd <<EOF
+    cat > /etc/ppp/options.l2tpd <<EOF
 require-mschap-v2
 ms-dns 127.0.0.1
 asyncmap 0
@@ -145,8 +131,8 @@ EOF
 
     netfilter-persistent save
 
-    systemctl enable strongswan xl2tpd
-    systemctl restart strongswan xl2tpd
+    systemctl enable strongswan
+    systemctl restart strongswan
 
     echo "VPN сервер успешно настроен."
     echo "Данные для подключения:"
