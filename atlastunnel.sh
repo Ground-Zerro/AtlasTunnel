@@ -9,7 +9,7 @@ check_server_installed() {
 }
 
 install_packages() {
-    REQUIRED_PACKAGES=(strongswan ppp lsof iptables iptables-persistent libstrongswan-standard-plugins libcharon-extra-plugins dialog unbound)
+    REQUIRED_PACKAGES=(libreswan ppp lsof iptables iptables-persistent dialog unbound)
 
     apt update -o Dir::Etc::sourcelist="sources.list" -o Dir::Etc::sourceparts="-" -o APT::Get::List-Cleanup="0"
 
@@ -25,27 +25,6 @@ install_packages() {
     done
 }
 
-remove_server() {
-    systemctl stop strongswan unbound || true
-    systemctl disable strongswan unbound || true
-    apt remove -y strongswan ppp lsof iptables-persistent unbound || true
-    rm -rf /etc/ipsec.conf /etc/ipsec.secrets /etc/ppp/options.xl2tpd /etc/ppp/chap-secrets /etc/unbound/unbound.conf.d/dot.conf || true
-    echo "VPN сервер успешно удалён."
-}
-
-add_user() {
-    local USERNAME=$1
-    local PASSWORD=$2
-
-    if [ -z "$USERNAME" ] || [ -z "$PASSWORD" ]; then
-        echo "Ошибка: Имя пользователя или пароль не указаны."
-        return 1
-    fi
-
-    echo "$USERNAME       *       $PASSWORD          *" >> /etc/ppp/chap-secrets
-    echo "Пользователь $USERNAME успешно добавлен."
-}
-
 setup_user() {
     echo -n "Введите имя пользователя для VPN: "
     read VPN_USER
@@ -53,7 +32,45 @@ setup_user() {
     read -s VPN_PASSWORD
     echo
 
-    add_user "$VPN_USER" "$VPN_PASSWORD"
+    if [ -z "$VPN_USER" ] || [ -z "$VPN_PASSWORD" ]; then
+        echo "Ошибка: Имя пользователя или пароль не указаны."
+        return 1
+    fi
+
+    echo "$VPN_USER       *       $VPN_PASSWORD          *" >> /etc/ppp/chap-secrets
+    echo "Пользователь $VPN_USER успешно добавлен."
+}
+
+delete_user() {
+    if [ ! -f /etc/ppp/chap-secrets ]; then
+        echo "Ошибка: файл /etc/ppp/chap-secrets не найден."
+        return 1
+    fi
+
+    echo "Список пользователей:"
+    USERS=($(awk -F'[: ]+' '!/^#/ && NF >= 3 {print $1}' /etc/ppp/chap-secrets))
+
+    if [ ${#USERS[@]} -eq 0 ]; then
+        echo "Нет пользователей для удаления."
+        return 1
+    fi
+
+    for i in "${!USERS[@]}"; do
+        echo "$((i + 1))) ${USERS[$i]}"
+    done
+
+    echo -n "Введите номер пользователя для удаления: "
+    read USER_INDEX
+
+    if ! [[ "$USER_INDEX" =~ ^[0-9]+$ ]] || [ "$USER_INDEX" -lt 1 ] || [ "$USER_INDEX" -gt ${#USERS[@]} ]; then
+        echo "Ошибка: некорректный номер пользователя."
+        return 1
+    fi
+
+    USER_TO_DELETE=${USERS[$((USER_INDEX - 1))]}
+
+    sed -i "/^$USER_TO_DELETE[[:space:]]/d" /etc/ppp/chap-secrets
+    echo "Пользователь $USER_TO_DELETE успешно удалён."
 }
 
 setup_server() {
@@ -63,16 +80,17 @@ setup_server() {
 
     VPN_SERVER_IP=$(hostname -I | awk '{print $1}')
 
+    # Correcting /etc/ipsec.conf to match proper syntax
     cat > /etc/ipsec.conf <<EOF
 config setup
-    uniqueids=never
+    uniqueids=no
+
 conn L2TP-PSK
     authby=secret
     pfs=no
-    auto=add
-    keyexchange=ikev1
-    ike=aes256-sha1-modp1024!
-    esp=aes256-sha1!
+    auto=start
+    ike=aes256-sha1-modp1024
+    phase2alg=aes256-sha1
     type=transport
     left=%any
     leftprotoport=17/1701
@@ -80,10 +98,12 @@ conn L2TP-PSK
     rightprotoport=17/1701
 EOF
 
+    # Creating /etc/ipsec.secrets file to store the PSK
     cat > /etc/ipsec.secrets <<EOF
 : PSK "$VPN_IPSEC_PSK"
 EOF
 
+    # Correct /etc/ppp/options.l2tpd file configuration
     cat > /etc/ppp/options.l2tpd <<EOF
 require-mschap-v2
 ms-dns 127.0.0.1
@@ -100,6 +120,7 @@ lcp-echo-interval 30
 lcp-echo-failure 4
 EOF
 
+    # Configure Unbound DNS
     mkdir -p /etc/unbound/unbound.conf.d
     cat > /etc/unbound/unbound.conf.d/dot.conf <<EOF
 server:
@@ -115,29 +136,39 @@ server:
         forward-addr: 149.112.112.112@853
 EOF
 
+    # Restart Unbound if it is enabled
     if systemctl is-enabled --quiet unbound; then
         systemctl restart unbound
     else
         echo "Сервис Unbound не найден. Пропускаем перезапуск."
     fi
 
+    # Enabling and configuring IP forwarding
     sysctl -w net.ipv4.ip_forward=1
     sed -i '/net.ipv4.ip_forward/d' /etc/sysctl.conf
     echo "net.ipv4.ip_forward = 1" >> /etc/sysctl.conf
 
+    # Apply iptables rules for NAT and forwarding
     iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
     iptables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
     iptables -A FORWARD -s 10.10.10.0/24 -j ACCEPT
 
-    netfilter-persistent save
+    # Save iptables rules
+    netfilter-persistent save -y >/dev/null 2>&1
+    if [ $? -eq 0 ]; then
+        echo "Правила iptables успешно сохранены."
+    else
+        echo "Ошибка при сохранении правил iptables."
+    fi
 
-    systemctl enable strongswan
-    systemctl restart strongswan
+    # Enable and restart ipsec service
+    systemctl enable ipsec
+    systemctl restart ipsec || {
+        echo "Ошибка при запуске сервиса ipsec. Проверьте конфигурацию."
+        exit 1
+    }
 
-    echo "VPN сервер успешно настроен."
-    echo "Данные для подключения:"
-    echo "Сервер: $VPN_SERVER_IP"
-    echo "IPSec PSK: $VPN_IPSEC_PSK"
+    echo "VPN сервер сконфигурирован."
 }
 
 show_configuration() {
@@ -148,43 +179,47 @@ show_configuration() {
 
 show_users() {
     if [ -f /etc/ppp/chap-secrets ]; then
-        echo "Список пользователей:"
+        echo "Пользоватлель - Пароль:"
         awk -F'[: ]+' '!/^#/ && NF >= 3 {print $1 " - " $3}' /etc/ppp/chap-secrets
     else
         echo "Ошибка: файл /etc/ppp/chap-secrets не найден."
     fi
 }
 
-
-if check_server_installed; then
-    VPN_SERVER_IP=$(hostname -I | awk '{print $1}')
-    VPN_IPSEC_PSK=$(grep -oP '(?<=: PSK ").*?(?=")' /etc/ipsec.secrets)
-    show_configuration
+main_menu() {
     echo "Выберите действие:"
-    echo "1) Удалить сервер"
-    echo "2) Добавить нового пользователя"
-    echo "3) Показать список пользователей"
+    echo "1) Добавить нового пользователя"
+    echo "2) Показать список пользователей"
+    echo "3) Удалить пользователя"
     read -p "Ваш выбор (1-3): " CHOICE
 
     case $CHOICE in
         1)
-            remove_server
-            ;;
-
-        2)
             setup_user
             ;;
 
-        3)
+        2)
             show_users
+            ;;
+
+        3)
+            delete_user
             ;;
 
         *)
             echo "Неверный выбор. Завершение работы."
             exit 1
             ;;
-    esac
+    esac  # <-- Added this closing "esac"
+}
+
+if check_server_installed; then
+    VPN_SERVER_IP=$(hostname -I | awk '{print $1}')
+    VPN_IPSEC_PSK=$(grep -oP '(?<=: PSK ").*?(?=")' /etc/ipsec.secrets)
+    show_configuration
+    main_menu
 else
     setup_server
+    show_configuration
     setup_user
 fi
