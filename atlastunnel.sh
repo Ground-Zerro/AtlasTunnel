@@ -78,9 +78,10 @@ setup_server() {
 
     VPN_IPSEC_PSK=$(tr -dc 'a-zA-Z' < /dev/urandom | head -c6)
 
-    VPN_SERVER_IP=$(hostname -I | awk '{print $1}')
+    # Получаем внешний IP адрес
+    VPN_SERVER_IP=$(curl -s http://checkip.amazonaws.com)
 
-    # Correcting /etc/ipsec.conf to match proper syntax
+    # Корректируем файл /etc/ipsec.conf для динамических соединений
     cat > /etc/ipsec.conf <<EOF
 config setup
     uniqueids=no
@@ -92,18 +93,23 @@ conn L2TP-PSK
     ike=aes256-sha1-modp1024
     phase2alg=aes256-sha1
     type=transport
-    left=%any
+    left=$VPN_SERVER_IP
     leftprotoport=17/1701
     right=%any
     rightprotoport=17/1701
+    dpdaction=clear
+    dpddelay=300s
+    dpdtimeout=1h
+    rekey=no
+    leftsubnet=0.0.0.0/0
 EOF
 
-    # Creating /etc/ipsec.secrets file to store the PSK
+    # Создаем файл /etc/ipsec.secrets для хранения PSK
     cat > /etc/ipsec.secrets <<EOF
 : PSK "$VPN_IPSEC_PSK"
 EOF
 
-    # Correct /etc/ppp/options.l2tpd file configuration
+    # Корректируем файл /etc/ppp/options.l2tpd
     cat > /etc/ppp/options.l2tpd <<EOF
 require-mschap-v2
 ms-dns 127.0.0.1
@@ -120,7 +126,7 @@ lcp-echo-interval 30
 lcp-echo-failure 4
 EOF
 
-    # Configure Unbound DNS
+    # Конфигурируем Unbound DNS
     mkdir -p /etc/unbound/unbound.conf.d
     cat > /etc/unbound/unbound.conf.d/dot.conf <<EOF
 server:
@@ -136,24 +142,24 @@ server:
         forward-addr: 149.112.112.112@853
 EOF
 
-    # Restart Unbound if it is enabled
+    # Перезапускаем Unbound, если он включен
     if systemctl is-enabled --quiet unbound; then
         systemctl restart unbound
     else
         echo "Сервис Unbound не найден. Пропускаем перезапуск."
     fi
 
-    # Enabling and configuring IP forwarding
+    # Включаем и настраиваем IP forwarding
     sysctl -w net.ipv4.ip_forward=1
     sed -i '/net.ipv4.ip_forward/d' /etc/sysctl.conf
     echo "net.ipv4.ip_forward = 1" >> /etc/sysctl.conf
 
-    # Apply iptables rules for NAT and forwarding
+    # Применяем правила iptables для NAT и форвардинга
     iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
     iptables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
     iptables -A FORWARD -s 10.10.10.0/24 -j ACCEPT
 
-    # Save iptables rules
+    # Сохраняем правила iptables
     netfilter-persistent save -y >/dev/null 2>&1
     if [ $? -eq 0 ]; then
         echo "Правила iptables успешно сохранены."
@@ -161,7 +167,7 @@ EOF
         echo "Ошибка при сохранении правил iptables."
     fi
 
-    # Enable and restart ipsec service
+    # Включаем и перезапускаем сервис ipsec
     systemctl enable ipsec
     systemctl restart ipsec || {
         echo "Ошибка при запуске сервиса ipsec. Проверьте конфигурацию."
@@ -179,7 +185,7 @@ show_configuration() {
 
 show_users() {
     if [ -f /etc/ppp/chap-secrets ]; then
-        echo "Пользоватлель - Пароль:"
+        echo "Пользователь - Пароль:"
         awk -F'[: ]+' '!/^#/ && NF >= 3 {print $1 " - " $3}' /etc/ppp/chap-secrets
     else
         echo "Ошибка: файл /etc/ppp/chap-secrets не найден."
@@ -210,7 +216,7 @@ main_menu() {
             echo "Неверный выбор. Завершение работы."
             exit 1
             ;;
-    esac  # <-- Added this closing "esac"
+    esac
 }
 
 if check_server_installed; then
@@ -223,3 +229,4 @@ else
     show_configuration
     setup_user
 fi
+
