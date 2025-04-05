@@ -1,87 +1,82 @@
 #!/bin/bash
+set -euo pipefail
+IFS=$'\n\t'
 
-check_server_installed() {
-    if [ -f /etc/ipsec.conf ] && [ -f /etc/ppp/chap-secrets ]; then
-        return 0
-    else
-        return 1
+LOG_FILE="/var/log/vpn-setup.log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+VPN_CONF="/etc/vpn.conf"
+
+check_root() {
+    if [ "$EUID" -ne 0 ]; then
+        echo "Запустите скрипт от root."
+        exit 1
     fi
 }
 
-install_packages() {
-    REQUIRED_PACKAGES=(libreswan ppp lsof iptables iptables-persistent dialog unbound)
+check_server_installed() {
+    [ -f /etc/ipsec.conf ] && [ -f /etc/ppp/chap-secrets ]
+}
 
-    apt update -o Dir::Etc::sourcelist="sources.list" -o Dir::Etc::sourceparts="-" -o APT::Get::List-Cleanup="0"
+detect_interface() {
+    ip route | awk '/default/ {print $5}' | head -n1
+}
+
+install_packages() {
+    local REQUIRED_PACKAGES=(libreswan ppp lsof iptables iptables-persistent dialog unbound curl)
+    apt update
 
     for PACKAGE in "${REQUIRED_PACKAGES[@]}"; do
         if ! dpkg -l | grep -qw "$PACKAGE"; then
-            apt install -y "$PACKAGE" || {
-                echo "Ошибка: не удалось установить $PACKAGE. Проверьте подключение к интернету или репозитории."
-                exit 1
-            }
+            echo "Устанавливаем $PACKAGE..."
+            apt install -y "$PACKAGE"
         else
             echo "$PACKAGE уже установлен."
         fi
     done
 }
 
-setup_user() {
-    echo -n "Введите имя пользователя для VPN: "
-    read VPN_USER
-    echo -n "Введите пароль для VPN: "
-    read -s VPN_PASSWORD
-    echo
-
-    if [ -z "$VPN_USER" ] || [ -z "$VPN_PASSWORD" ]; then
-        echo "Ошибка: Имя пользователя или пароль не указаны."
-        return 1
-    fi
-
-    echo "$VPN_USER       *       $VPN_PASSWORD          *" >> /etc/ppp/chap-secrets
-    echo "Пользователь $VPN_USER успешно добавлен."
+generate_psk() {
+    tr -dc 'a-zA-Z' </dev/urandom | head -c16
 }
 
-delete_user() {
-    if [ ! -f /etc/ppp/chap-secrets ]; then
-        echo "Ошибка: файл /etc/ppp/chap-secrets не найден."
-        return 1
+get_external_ip() {
+    local IP
+    IP=$(curl -s http://checkip.amazonaws.com)
+    if [[ "$IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "$IP"
+    else
+        echo "Ошибка: не удалось определить внешний IP."
+        exit 1
     fi
+}
 
-    echo "Список пользователей:"
-    USERS=($(awk -F'[: ]+' '!/^#/ && NF >= 3 {print $1}' /etc/ppp/chap-secrets))
+save_vpn_config() {
+    cat > "$VPN_CONF" <<EOF
+VPN_SERVER_IP=$VPN_SERVER_IP
+VPN_IPSEC_PSK=$VPN_IPSEC_PSK
+EOF
+}
 
-    if [ ${#USERS[@]} -eq 0 ]; then
-        echo "Нет пользователей для удаления."
-        return 1
+load_vpn_config() {
+    if [ -f "$VPN_CONF" ]; then
+        # shellcheck disable=SC1090
+        source "$VPN_CONF"
+    else
+        echo "Файл конфигурации VPN не найден."
+        exit 1
     fi
-
-    for i in "${!USERS[@]}"; do
-        echo "$((i + 1))) ${USERS[$i]}"
-    done
-
-    echo -n "Введите номер пользователя для удаления: "
-    read USER_INDEX
-
-    if ! [[ "$USER_INDEX" =~ ^[0-9]+$ ]] || [ "$USER_INDEX" -lt 1 ] || [ "$USER_INDEX" -gt ${#USERS[@]} ]; then
-        echo "Ошибка: некорректный номер пользователя."
-        return 1
-    fi
-
-    USER_TO_DELETE=${USERS[$((USER_INDEX - 1))]}
-
-    sed -i "/^$USER_TO_DELETE[[:space:]]/d" /etc/ppp/chap-secrets
-    echo "Пользователь $USER_TO_DELETE успешно удалён."
 }
 
 setup_server() {
     install_packages
 
-    VPN_IPSEC_PSK=$(tr -dc 'a-zA-Z' < /dev/urandom | head -c6)
+    VPN_SERVER_IP=$(get_external_ip)
+    VPN_IPSEC_PSK=$(generate_psk)
+    DEFAULT_IF=$(detect_interface)
 
-    # Получаем внешний IP адрес
-    VPN_SERVER_IP=$(curl -s http://checkip.amazonaws.com)
+    echo "Настраиваем VPN-сервер..."
 
-    # Корректируем файл /etc/ipsec.conf для динамических соединений
     cat > /etc/ipsec.conf <<EOF
 config setup
     uniqueids=no
@@ -104,12 +99,8 @@ conn L2TP-PSK
     leftsubnet=0.0.0.0/0
 EOF
 
-    # Создаем файл /etc/ipsec.secrets для хранения PSK
-    cat > /etc/ipsec.secrets <<EOF
-: PSK "$VPN_IPSEC_PSK"
-EOF
+    echo ": PSK \"$VPN_IPSEC_PSK\"" > /etc/ipsec.secrets
 
-    # Корректируем файл /etc/ppp/options.l2tpd
     cat > /etc/ppp/options.l2tpd <<EOF
 require-mschap-v2
 ms-dns 127.0.0.1
@@ -126,7 +117,6 @@ lcp-echo-interval 30
 lcp-echo-failure 4
 EOF
 
-    # Конфигурируем Unbound DNS
     mkdir -p /etc/unbound/unbound.conf.d
     cat > /etc/unbound/unbound.conf.d/dot.conf <<EOF
 server:
@@ -142,91 +132,124 @@ server:
         forward-addr: 149.112.112.112@853
 EOF
 
-    # Перезапускаем Unbound, если он включен
-    if systemctl is-enabled --quiet unbound; then
-        systemctl restart unbound
-    else
-        echo "Сервис Unbound не найден. Пропускаем перезапуск."
-    fi
+    systemctl restart unbound || echo "Unbound не запущен."
 
-    # Включаем и настраиваем IP forwarding
+    echo "Включаем IP forwarding..."
     sysctl -w net.ipv4.ip_forward=1
-    sed -i '/net.ipv4.ip_forward/d' /etc/sysctl.conf
+    sed -i '/^net.ipv4.ip_forward/d' /etc/sysctl.conf
     echo "net.ipv4.ip_forward = 1" >> /etc/sysctl.conf
 
-    # Применяем правила iptables для NAT и форвардинга
-    iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+    echo "Настраиваем iptables..."
+    iptables -t nat -A POSTROUTING -o "$DEFAULT_IF" -j MASQUERADE
     iptables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
     iptables -A FORWARD -s 10.10.10.0/24 -j ACCEPT
+    netfilter-persistent save
 
-    # Сохраняем правила iptables
-    netfilter-persistent save -y >/dev/null 2>&1
-    if [ $? -eq 0 ]; then
-        echo "Правила iptables успешно сохранены."
-    else
-        echo "Ошибка при сохранении правил iptables."
+    systemctl enable ipsec
+    systemctl restart ipsec
+
+    save_vpn_config
+
+    echo "VPN-сервер настроен."
+}
+
+setup_user() {
+    echo -n "Введите имя пользователя: "
+    read VPN_USER
+    read -s -p "Введите пароль: " VPN_PASSWORD
+    echo
+
+    if [ -z "$VPN_USER" ] || [ -z "$VPN_PASSWORD" ]; then
+        echo "Ошибка: имя или пароль пусты."
+        return 1
     fi
 
-    # Включаем и перезапускаем сервис ipsec
-    systemctl enable ipsec
-    systemctl restart ipsec || {
-        echo "Ошибка при запуске сервиса ipsec. Проверьте конфигурацию."
-        exit 1
-    }
+    if grep -q "^$VPN_USER[[:space:]]" /etc/ppp/chap-secrets; then
+        echo "Пользователь уже существует."
+        return 1
+    fi
 
-    echo "VPN сервер сконфигурирован."
+    echo "$VPN_USER    *    $VPN_PASSWORD    *" >> /etc/ppp/chap-secrets
+    echo "Пользователь $VPN_USER добавлен."
+}
+
+show_users() {
+    if [ -f /etc/ppp/chap-secrets ]; then
+        echo "Пользователи:"
+        awk '!/^#/ && NF >= 3 {print $1 " - " $3}' /etc/ppp/chap-secrets
+    else
+        echo "Файл пользователей не найден."
+    fi
+}
+
+delete_user() {
+    if [ ! -f /etc/ppp/chap-secrets ]; then
+        echo "Файл не найден."
+        return 1
+    fi
+
+    USERS=($(awk '!/^#/ && NF >= 3 {print $1}' /etc/ppp/chap-secrets))
+    if [ ${#USERS[@]} -eq 0 ]; then
+        echo "Нет пользователей."
+        return 1
+    fi
+
+    echo "Выберите пользователя для удаления:"
+    for i in "${!USERS[@]}"; do
+        echo "$((i+1))) ${USERS[$i]}"
+    done
+
+    read -p "Номер: " CHOICE
+    if ! [[ "$CHOICE" =~ ^[0-9]+$ ]] || [ "$CHOICE" -lt 1 ] || [ "$CHOICE" -gt ${#USERS[@]} ]; then
+        echo "Неверный выбор."
+        return 1
+    fi
+
+    USER_TO_DELETE=${USERS[$((CHOICE - 1))]}
+    escaped_user=$(printf '%s\n' "$USER_TO_DELETE" | sed 's/[][\.*^$/]/\\&/g')
+    sed -i "/^$escaped_user[[:space:]]/d" /etc/ppp/chap-secrets
+    echo "Пользователь $USER_TO_DELETE удалён."
 }
 
 show_configuration() {
+    load_vpn_config
     echo "Данные для подключения:"
     echo "Сервер: $VPN_SERVER_IP"
     echo "IPSec PSK: $VPN_IPSEC_PSK"
 }
 
-show_users() {
-    if [ -f /etc/ppp/chap-secrets ]; then
-        echo "Пользователь - Пароль:"
-        awk -F'[: ]+' '!/^#/ && NF >= 3 {print $1 " - " $3}' /etc/ppp/chap-secrets
-    else
-        echo "Ошибка: файл /etc/ppp/chap-secrets не найден."
-    fi
-}
-
 main_menu() {
-    echo "Выберите действие:"
-    echo "1) Добавить нового пользователя"
-    echo "2) Показать список пользователей"
+    echo
+    echo "=== Управление VPN ==="
+    echo "1) Добавить пользователя"
+    echo "2) Показать пользователей"
     echo "3) Удалить пользователя"
-    read -p "Ваш выбор (1-3): " CHOICE
+    echo "4) Показать конфигурацию"
+    echo "0) Выход"
+    echo "======================"
 
-    case $CHOICE in
-        1)
-            setup_user
-            ;;
-
-        2)
-            show_users
-            ;;
-
-        3)
-            delete_user
-            ;;
-
-        *)
-            echo "Неверный выбор. Завершение работы."
-            exit 1
-            ;;
+    read -p "Выбор: " CHOICE
+    case "$CHOICE" in
+        1) setup_user ;;
+        2) show_users ;;
+        3) delete_user ;;
+        4) show_configuration ;;
+        0) exit 0 ;;
+        *) echo "Неверный выбор" ;;
     esac
 }
 
+### Запуск
+check_root
+
 if check_server_installed; then
-    VPN_SERVER_IP=$(hostname -I | awk '{print $1}')
-    VPN_IPSEC_PSK=$(grep -oP '(?<=: PSK ").*?(?=")' /etc/ipsec.secrets)
+    load_vpn_config
     show_configuration
-    main_menu
+    while true; do
+        main_menu
+    done
 else
     setup_server
     show_configuration
     setup_user
 fi
-
