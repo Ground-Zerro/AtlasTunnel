@@ -3,7 +3,7 @@ set -e
 
 VPN_USER="vpnuser"
 VPN_PASS=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c8)
-VPN_PSK=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c16)
+VPN_PSK=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c5)
 VPN_LOCAL_IP="10.30.40.1"
 VPN_REMOTE_IP_RANGE="10.30.40.10-100"
 VPN_PUBLIC_IP=$(curl -s https://ipinfo.io/ip)
