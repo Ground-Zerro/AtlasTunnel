@@ -1,103 +1,85 @@
-#!/bin/bash
+#!/bin/sh
+
 set -e
 
-if [ "$EUID" -ne 0 ]; then
-  echo "Запустите от root"
-  exit 1
+VPN_USER="vpnuser"
+VPN_PASS="vpnpass"
+VPN_LOCAL_IP="192.168.18.1"
+VPN_REMOTE_IP_RANGE="192.168.18.100-200"
+
+echo "[*] Установка необходимых пакетов..."
+apt-get update
+apt-get install -y pptpd iptables-persistent
+
+echo "[*] Настройка /etc/pptpd.conf..."
+PPTPD_CONF="/etc/pptpd.conf"
+if [ ! -f "$PPTPD_CONF" ]; then
+    touch "$PPTPD_CONF"
 fi
 
-VPN_USER="${VPN_USER:-vpnuser}"
-VPN_PASSWORD="${VPN_PASSWORD:-vpnpass}"
-VPN_LOCAL_IP="192.168.18.1"
-VPN_REMOTE_IP_RANGE="192.168.18.10-192.168.18.100"
-VPN_SUBNET="192.168.18.0/24"
-VPN_INTERFACE="$(ip route | grep default | awk '{print $5}' | head -n1)"
-
-echo "Настраиваем L2TP без IPsec"
-echo "VPN_USER=$VPN_USER, VPN_PASSWORD=$VPN_PASSWORD, Интерфейс=$VPN_INTERFACE"
-
-# Установка нужных пакетов
-apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y pptpd ppp iptables-persistent
-
-# Настройка pptpd
-cat > /etc/pptpd/pptpd.conf <<EOF
-[global]
-port = 1701
-
-[lns default]
-ip range = $VPN_REMOTE_IP_RANGE
-local ip = $VPN_LOCAL_IP
-require chap = yes
-refuse pap = yes
-require authentication = yes
-pppoptfile = /etc/ppp/options.pptpd
-length bit = yes
+cat > "$PPTPD_CONF" <<EOF
+option /etc/ppp/pptpd-options
+logwtmp
+localip $VPN_LOCAL_IP
+remoteip $VPN_REMOTE_IP_RANGE
 EOF
 
-# Настройка PPP
-cat > /etc/ppp/options.pptpd <<EOF
+echo "[*] Настройка /etc/ppp/pptpd-options..."
+PPTPD_OPTIONS="/etc/ppp/pptpd-options"
+cat > "$PPTPD_OPTIONS" <<EOF
+name pptpd
+refuse-pap
+refuse-chap
+refuse-mschap
 require-mschap-v2
+require-mppe-128
 ms-dns 8.8.8.8
 ms-dns 1.1.1.1
-asyncmap 0
-auth
-crtscts
-lock
-hide-password
-modem
+nobsdcomp
+nodeflate
+noipx
 debug
-proxyarp
+lock
+auth
+mtu 1400
+mru 1400
 lcp-echo-interval 30
 lcp-echo-failure 4
 EOF
 
-# Учетка
-cat > /etc/ppp/chap-secrets <<EOF
-EOF
+echo "[*] Настройка пользователя..."
+CHAP_SECRETS="/etc/ppp/chap-secrets"
+if ! grep -q "$VPN_USER" "$CHAP_SECRETS"; then
+    echo "$VPN_USER pptpd $VPN_PASS *" >> "$CHAP_SECRETS"
+fi
 
-# Настройка sysctl (без дублирования)
-declare -A sysctl_settings=(
-  ["net.ipv4.ip_forward"]=1
-  ["net.ipv4.conf.all.accept_redirects"]=0
-  ["net.ipv4.conf.all.send_redirects"]=0
-  ["net.ipv4.conf.default.accept_redirects"]=0
-  ["net.ipv4.conf.default.send_redirects"]=0
-)
+echo "[*] Включение IP маршрутизации..."
+SYSCTL_CONF="/etc/sysctl.conf"
+if ! grep -q "^net.ipv4.ip_forward=1" "$SYSCTL_CONF"; then
+    echo "net.ipv4.ip_forward=1" >> "$SYSCTL_CONF"
+fi
+sysctl -w net.ipv4.ip_forward=1
 
-for key in "${!sysctl_settings[@]}"; do
-  value="${sysctl_settings[$key]}"
-  if grep -q "^${key}=" /etc/sysctl.conf; then
-    sed -i "s|^${key}=.*|${key}=${value}|" /etc/sysctl.conf
-  elif grep -q "^#\?${key}[[:space:]]\?=" /etc/sysctl.conf; then
-    sed -i "s|^#\?${key}[[:space:]]\?=.*|${key} = ${value}|" /etc/sysctl.conf
-  else
-    echo "${key} = ${value}" >> /etc/sysctl.conf
-  fi
-done
+echo "[*] Настройка iptables..."
+iptables -t nat -C POSTROUTING -o eth0 -j MASQUERADE 2>/dev/null || \
+iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
 
-sysctl -p
+iptables -C FORWARD -i ppp+ -o ppp+ -j ACCEPT 2>/dev/null || \
+iptables -A FORWARD -i ppp+ -o ppp+ -j ACCEPT
 
-# Настройка iptables (без дублирования)
-iptables -C FORWARD -s $VPN_SUBNET -j ACCEPT 2>/dev/null || iptables -A FORWARD -s $VPN_SUBNET -j ACCEPT
-iptables -C FORWARD -d $VPN_SUBNET -j ACCEPT 2>/dev/null || iptables -A FORWARD -d $VPN_SUBNET -j ACCEPT
-iptables -C INPUT -p udp --dport 1701 -j ACCEPT 2>/dev/null || iptables -A INPUT -p udp --dport 1701 -j ACCEPT
-iptables -t nat -C POSTROUTING -s $VPN_SUBNET -o $VPN_INTERFACE -j MASQUERADE 2>/dev/null || \
-iptables -t nat -A POSTROUTING -s $VPN_SUBNET -o $VPN_INTERFACE -j MASQUERADE
+iptables -C FORWARD -i ppp+ -o eth0 -j ACCEPT 2>/dev/null || \
+iptables -A FORWARD -i ppp+ -o eth0 -j ACCEPT
 
-iptables-save > /etc/iptables/rules.v4
+iptables -C FORWARD -i eth0 -o ppp+ -j ACCEPT 2>/dev/null || \
+iptables -A FORWARD -i eth0 -o ppp+ -j ACCEPT
 
-# Удаляем strongSwan если установлен
-apt-get remove -y strongswan* || true
+echo "[*] Сохранение iptables..."
+netfilter-persistent save
 
-# Включаем и запускаем L2TP
+echo "[*] Перезапуск pptpd..."
 systemctl enable pptpd
 systemctl restart pptpd
 
-echo
-echo "✅ L2TP сервер без IPsec запущен."
-echo "ℹ️ Подключение:"
-echo "IP сервера: $(curl -s ifconfig.me)"
-echo "Имя пользователя: $VPN_USER"
-echo "Пароль: $VPN_PASSWORD"
-echo "⚠️ Без IPsec (незашифрованный L2TP)."
+echo "[✓] Установка и настройка завершены. Используйте:"
+echo "    логин: $VPN_USER"
+echo "    пароль: $VPN_PASS"
