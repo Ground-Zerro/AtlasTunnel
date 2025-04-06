@@ -66,14 +66,16 @@ ms-dns 8.8.8.8
 ms-dns 1.1.1.1
 asyncmap 0
 auth
-lock
 hide-password
-modem
 mtu 1360
 mru 1360
 lcp-echo-failure 4
 lcp-echo-interval 30
 EOF
+
+echo "[*] Очистка устаревших pppd-опций (modem, lock)..."
+sed -i '/^modem$/d' /etc/ppp/options.l2tpd
+sed -i '/^lock$/d' /etc/ppp/options.l2tpd
 
 echo "[*] Добавление пользователя..."
 echo "\"$VPN_USER\" * $VPN_PASS *" >> /etc/ppp/chap-secrets
