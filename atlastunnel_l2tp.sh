@@ -6,11 +6,11 @@ VPN_PASS=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c8)
 VPN_LOCAL_IP="10.30.40.1"
 VPN_REMOTE_IP_RANGE="10.30.40.10-100"
 
-echo "[*] Установка пакетов..."
+echo "[*] Установка необходимых пакетов..."
 apt-get update
 echo iptables-persistent iptables-persistent/autosave_v4 boolean true | debconf-set-selections
 echo iptables-persistent iptables-persistent/autosave_v6 boolean false | debconf-set-selections
-DEBIAN_FRONTEND=noninteractive apt-get install -y xl2tpd ppp iptables-persistent
+DEBIAN_FRONTEND=noninteractive apt-get install -y xl2tpd ppp iptables-persistent curl
 
 echo "[*] Настройка xl2tpd..."
 mkdir -p /etc/xl2tpd
@@ -21,10 +21,6 @@ port = 1701
 [lns default]
 ip range = $VPN_REMOTE_IP_RANGE
 local ip = $VPN_LOCAL_IP
-refuse pap = yes
-refuse chap = yes
-refuse mschap = yes
-require mschap-v2 = yes
 require authentication = yes
 name = l2tpd
 ppp debug = yes
@@ -55,7 +51,7 @@ lcp-echo-failure 4
 lcp-echo-interval 30
 EOF
 
-echo "[*] Добавление пользователя..."
+echo "[*] Добавление VPN пользователя..."
 echo "$VPN_USER * $VPN_PASS *" >> /etc/ppp/chap-secrets
 
 echo "[*] Включение IP маршрутизации..."
@@ -99,11 +95,11 @@ EOF
 systemctl daemon-reexec
 systemctl daemon-reload
 
-echo "[*] Включение и запуск xl2tpd..."
+echo "[*] Включение и запуск L2TP сервиса..."
 systemctl enable xl2tpd
 systemctl restart xl2tpd
 
-echo "[*] Установка L2TP Tunnel manager (atlas)..."
+echo "[*] Установка менеджера клиентов Atlas..."
 mkdir -p /etc/atlastunnel
 cp /etc/ppp/chap-secrets /etc/atlastunnel/chap-secrets.backup
 
@@ -230,7 +226,8 @@ EOF
 chmod +x /etc/atlastunnel/manager.sh
 ln -sf /etc/atlastunnel/manager.sh /usr/local/bin/atlas
 
-echo "[✓] Готово! Используйте:"
+echo "[✓] Установка завершена."
 echo "    IP сервера: $(curl -s https://ipinfo.io/ip)"
 echo "    Логин: $VPN_USER"
 echo "    Пароль: $VPN_PASS"
+echo "    Менеджер: atlas"
