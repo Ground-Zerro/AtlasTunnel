@@ -64,18 +64,22 @@ if ! grep -q "^net.ipv4.ip_forward=1" "$SYSCTL_CONF"; then
 fi
 sysctl -w net.ipv4.ip_forward=1
 
+echo "[*] Определение внешнего интерфейса..."
+WAN_IFACE=$(ip route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if ($i=="dev") print $(i+1); exit}')
+echo "    Используется интерфейс: $WAN_IFACE"
+
 echo "[*] Настройка iptables..."
-iptables -t nat -C POSTROUTING -o eth0 -j MASQUERADE 2>/dev/null || \
-iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+iptables -t nat -C POSTROUTING -o "$WAN_IFACE" -j MASQUERADE 2>/dev/null || \
+iptables -t nat -A POSTROUTING -o "$WAN_IFACE" -j MASQUERADE
 
 iptables -C FORWARD -i ppp+ -o ppp+ -j ACCEPT 2>/dev/null || \
 iptables -A FORWARD -i ppp+ -o ppp+ -j ACCEPT
 
-iptables -C FORWARD -i ppp+ -o eth0 -j ACCEPT 2>/dev/null || \
-iptables -A FORWARD -i ppp+ -o eth0 -j ACCEPT
+iptables -C FORWARD -i ppp+ -o "$WAN_IFACE" -j ACCEPT 2>/dev/null || \
+iptables -A FORWARD -i ppp+ -o "$WAN_IFACE" -j ACCEPT
 
-iptables -C FORWARD -i eth0 -o ppp+ -j ACCEPT 2>/dev/null || \
-iptables -A FORWARD -i eth0 -o ppp+ -j ACCEPT
+iptables -C FORWARD -i "$WAN_IFACE" -o ppp+ -j ACCEPT 2>/dev/null || \
+iptables -A FORWARD -i "$WAN_IFACE" -o ppp+ -j ACCEPT
 
 echo "[*] Сохранение iptables и включение автозапуска..."
 netfilter-persistent save
