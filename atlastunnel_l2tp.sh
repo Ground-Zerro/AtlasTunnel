@@ -17,8 +17,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y xl2tpd strongswan ppp iptables
 echo "[*] Настройка IPsec (strongSwan)..."
 cat > /etc/ipsec.conf <<EOF
 config setup
-    charondebug="all"
-    uniqueids=no
+    charondebug="ike 1, knl 1, cfg 0"
 
 conn L2TP-PSK
     authby=secret
@@ -84,15 +83,19 @@ echo "[*] Включение IP маршрутизации..."
 grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.conf || echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
 sysctl -w net.ipv4.ip_forward=1
 
+echo "[*] Определение внешнего интерфейса..."
+WAN_IFACE=$(ip route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if ($i=="dev") print $(i+1); exit}')
+echo "    Используется интерфейс: $WAN_IFACE"
+
 echo "[*] Настройка iptables..."
-iptables -t nat -C POSTROUTING -o eth0 -j MASQUERADE 2>/dev/null || \
-iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+iptables -t nat -C POSTROUTING -o "$WAN_IFACE" -j MASQUERADE 2>/dev/null || \
+iptables -t nat -A POSTROUTING -o "$WAN_IFACE" -j MASQUERADE
 
-iptables -C FORWARD -i ppp+ -o eth0 -j ACCEPT 2>/dev/null || \
-iptables -A FORWARD -i ppp+ -o eth0 -j ACCEPT
+iptables -C FORWARD -i ppp+ -o "$WAN_IFACE" -j ACCEPT 2>/dev/null || \
+iptables -A FORWARD -i ppp+ -o "$WAN_IFACE" -j ACCEPT
 
-iptables -C FORWARD -i eth0 -o ppp+ -j ACCEPT 2>/dev/null || \
-iptables -A FORWARD -i eth0 -o ppp+ -j ACCEPT
+iptables -C FORWARD -i "$WAN_IFACE" -o ppp+ -j ACCEPT 2>/dev/null || \
+iptables -A FORWARD -i "$WAN_IFACE" -o ppp+ -j ACCEPT
 
 netfilter-persistent save
 systemctl enable netfilter-persistent
@@ -105,7 +108,7 @@ echo "[*] Настройка systemd сервиса для xl2tpd..."
 cat > /etc/systemd/system/xl2tpd.service <<EOF
 [Unit]
 Description=Layer 2 Tunnelling Protocol Daemon (L2TP)
-After=network.target ipsec.service
+After=network.target strongswan-starter.service
 
 [Service]
 ExecStart=/usr/sbin/xl2tpd -D
@@ -122,8 +125,8 @@ systemctl daemon-reexec
 systemctl daemon-reload
 
 echo "[*] Включение и запуск сервисов..."
-systemctl enable strongswan
-systemctl restart strongswan
+systemctl enable strongswan-starter
+systemctl restart strongswan-starter
 
 systemctl enable xl2tpd
 systemctl restart xl2tpd
@@ -256,11 +259,11 @@ chmod +x /etc/atlastunnel/manager.sh
 ln -sf /etc/atlastunnel/manager.sh /usr/local/bin/atlas
 
 echo "[✓] Установка завершена."
-echo " "
+echo
 echo "📡  Подключение к VPN:"
 echo "    Сервер IP: $VPN_PUBLIC_IP"
 echo "    Логин:     $VPN_USER"
 echo "    Пароль:    $VPN_PASS"
 echo "    PSK (ключ):$VPN_PSK"
-echo " "
+echo
 echo "⚙ Менеджер клиентов: команда 'atlas'"
