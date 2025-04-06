@@ -135,14 +135,67 @@ mkdir -p /etc/atlastunnel
 cp /etc/ppp/chap-secrets /etc/atlastunnel/chap-secrets.backup
 cat << 'EOF' > /etc/atlastunnel/manager.sh
 #!/bin/sh
-CHAP="/etc/ppp/chap-secrets"
 
-list() {
-  echo "[*] Клиенты:"
-  grep -vE '^\s*#|^\s*$' "$CHAP" | awk '{printf "  %-20s %-20s\n", $1, $3}'
+CHAP="/etc/ppp/chap-secrets"
+L2TP_SERVICE="xl2tpd"
+IPSEC_SERVICE="strongswan-starter"
+IPSEC_SECRET_FILE="/etc/ipsec.secrets"
+CLIENT_LOGINS=""
+
+get_public_ip() {
+  curl -s https://ipinfo.io/ip
 }
 
-add() {
+get_psk() {
+  grep -vE '^\s*#|^\s*$' "$IPSEC_SECRET_FILE" | awk -F'"' '{print $2}'
+}
+
+print_status() {
+  echo "[*] Статус L2TP/IPsec сервера:"
+  systemctl is-active "$IPSEC_SERVICE" >/dev/null 2>&1 && echo "    IPsec: ✅ ЗАПУЩЕН" || echo "    IPsec: ❌ ОСТАНОВЛЕН"
+  systemctl is-active "$L2TP_SERVICE" >/dev/null 2>&1 && echo "    L2TP : ✅ ЗАПУЩЕН" || echo "    L2TP : ❌ ОСТАНОВЛЕН"
+  echo "    IP сервера: $(get_public_ip)"
+  echo "    PSK (ключ): $(get_psk)"
+}
+
+list_clients() {
+  echo
+  echo "[*] Клиенты:"
+  CLIENT_LOGINS=""
+  if [ ! -f "$CHAP" ] || ! grep -qvE '^\s*#|^\s*$' "$CHAP"; then
+    echo "    Нет добавленных клиентов."
+    return
+  fi
+
+  printf "\n  %-4s %-20s %-20s\n" "№" "ЛОГИН" "ПАРОЛЬ"
+  echo "  ---------------------------------------------------------"
+  i=1
+  while IFS= read -r line; do
+    LOGIN=$(echo "$line" | awk '{print $1}' | sed 's/"//g')
+    PASS=$(echo "$line" | awk '{print $3}')
+    printf "  %-4s %-20s %-20s\n" "$i" "$LOGIN" "$PASS"
+    CLIENT_LOGINS="$CLIENT_LOGINS $LOGIN"
+    i=$((i + 1))
+  done <<EOF_CHAP
+$(grep -vE '^\s*#|^\s*$' "$CHAP")
+EOF_CHAP
+  echo
+}
+
+get_login_by_index() {
+  INDEX=$1
+  i=1
+  for login in $CLIENT_LOGINS; do
+    if [ "$i" -eq "$INDEX" ]; then
+      echo "$login"
+      return
+    fi
+    i=$((i + 1))
+  done
+  echo ""
+}
+
+add_client() {
   printf "Логин: "
   read LOGIN
   grep -q "^\"$LOGIN\"" "$CHAP" && echo "❌ Уже есть." && return
@@ -151,37 +204,93 @@ add() {
   echo "✅ Добавлен: $LOGIN | $PASS"
 }
 
-del() {
-  printf "Удалить логин: "
-  read LOGIN
-  sed -i "/^\"$LOGIN\" /d" "$CHAP"
-  echo "✅ Удалён: $LOGIN"
+delete_client() {
+  echo "[*] Удаление клиента..."
+  if [ -z "$CLIENT_LOGINS" ]; then
+    echo "  ❌ Нет клиентов для удаления."
+    return
+  fi
+
+  printf "  Введите номер клиента для удаления: "
+  read NUM
+
+  LOGIN=$(get_login_by_index "$NUM")
+  if [ -z "$LOGIN" ]; then
+    echo "  ❌ Неверный номер клиента."
+    return
+  fi
+
+  sed -i "/^\"$LOGIN\"\s\+\*/d" "$CHAP"
+  echo "  ✅ Клиент \"$LOGIN\" удалён."
 }
 
-passwd() {
-  printf "Логин: "
-  read LOGIN
-  PASS=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c8)
-  sed -i "s|^\"$LOGIN\" .*|\"$LOGIN\" * $PASS *|" "$CHAP"
-  echo "✅ Новый пароль: $PASS"
+change_password() {
+  echo "[*] Смена пароля клиента..."
+  if [ -z "$CLIENT_LOGINS" ]; then
+    echo "  ❌ Нет клиентов для изменения пароля."
+    return
+  fi
+
+  printf "  Введите номер клиента: "
+  read NUM
+
+  LOGIN=$(get_login_by_index "$NUM")
+  if [ -z "$LOGIN" ]; then
+    echo "  ❌ Неверный номер клиента."
+    return
+  fi
+
+  NEWPASS=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c8)
+  sed -i "s|^\"$LOGIN\" * \S\+ \*|\"$LOGIN\" * $NEWPASS *|" "$CHAP"
+  echo "  ✅ Новый пароль клиента \"$LOGIN\": $NEWPASS"
+}
+
+start_l2tp() {
+  echo "[*] Запуск L2TP и IPsec..."
+  systemctl start "$IPSEC_SERVICE"
+  systemctl start "$L2TP_SERVICE"
+  echo "✅ Запущено."
+}
+
+stop_l2tp() {
+  echo "[*] Остановка L2TP и IPsec..."
+  systemctl stop "$L2TP_SERVICE"
+  systemctl stop "$IPSEC_SERVICE"
+  echo "🛑 Остановлено."
+}
+
+restart_l2tp() {
+  echo "[*] Перезапуск L2TP и IPsec..."
+  systemctl restart "$IPSEC_SERVICE"
+  systemctl restart "$L2TP_SERVICE"
+  echo "🔄 Перезапущено."
 }
 
 while true; do
-  echo; echo "===== Меню Atlas ====="
-  echo "1) Список"
-  echo "2) Добавить"
-  echo "3) Удалить"
-  echo "4) Новый пароль"
+  echo
+  print_status
+  list_clients
+  echo "===== Меню Atlas L2TP ====="
+  echo "1) Запустить сервер"
+  echo "2) Остановить сервер"
+  echo "3) Перезапустить сервер"
+  echo "4) Добавить клиента"
+  echo "5) Удалить клиента"
+  echo "6) Сменить пароль клиента"
   echo "0) Выход"
+  echo "==========================="
   printf "Выбор: "
   read x
+  echo
   case $x in
-    1) list ;;
-    2) add ;;
-    3) del ;;
-    4) passwd ;;
-    0) break ;;
-    *) echo "❌ Неверный выбор" ;;
+    1) start_l2tp ;;
+    2) stop_l2tp ;;
+    3) restart_l2tp ;;
+    4) add_client ;;
+    5) delete_client ;;
+    6) change_password ;;
+    0) echo "Выход."; break ;;
+    *) echo "❌ Неверный выбор. Попробуйте снова." ;;
   esac
 done
 EOF
