@@ -8,7 +8,7 @@ VPN_LOCAL_IP="10.30.40.1"
 VPN_REMOTE_IP_RANGE="10.30.40.10-100"
 VPN_PUBLIC_IP=$(curl -s https://ipinfo.io/ip)
 
-echo "[*] Установка пакетов..."
+echo "[*] Установка необходимых пакетов..."
 apt-get update
 echo iptables-persistent iptables-persistent/autosave_v4 boolean true | debconf-set-selections
 echo iptables-persistent iptables-persistent/autosave_v6 boolean false | debconf-set-selections
@@ -121,25 +121,21 @@ Restart=on-failure
 WantedBy=multi-user.target
 EOF
 
+echo "[*] Активация сервисов..."
 systemctl daemon-reexec
 systemctl daemon-reload
-
-echo "[*] Включение и запуск сервисов..."
 systemctl enable strongswan-starter
 systemctl restart strongswan-starter
-
 systemctl enable xl2tpd
 systemctl restart xl2tpd
 
 echo "[*] Установка менеджера клиентов Atlas..."
 mkdir -p /etc/atlastunnel
 cp /etc/ppp/chap-secrets /etc/atlastunnel/chap-secrets.backup
-
 cat << 'EOF' > /etc/atlastunnel/manager.sh
 #!/bin/sh
 L2TP_SERVICE="xl2tpd"
 CHAP_SECRETS="/etc/ppp/chap-secrets"
-CLIENT_LOGINS=""
 
 print_status() {
     echo "[*] Статус L2TP сервера:"
@@ -147,106 +143,57 @@ print_status() {
 }
 
 list_clients() {
-    echo
     echo "[*] Список клиентов:"
-    CLIENT_LOGINS=""
-    if [ ! -f "$CHAP_SECRETS" ] || ! grep -qvE '^\s*#|^\s*$' "$CHAP_SECRETS"; then
-        echo "    Нет добавленных клиентов."
-        return
-    fi
-    printf "\n  %-4s %-20s %-20s\n" "№" "ЛОГИН" "ПАРОЛЬ"
-    echo "  ---------------------------------------------------------"
-    i=1
-    while IFS= read -r line; do
-        USER=$(echo "$line" | awk '{print $1}')
-        PASS=$(echo "$line" | awk '{print $3}')
-        printf "  %-4s %-20s %-20s\n" "$i" "$USER" "$PASS"
-        CLIENT_LOGINS="$CLIENT_LOGINS $USER"
-        i=$((i + 1))
-    done <<EOF_CHAP
-$(grep -vE '^\s*#|^\s*$' "$CHAP_SECRETS")
-EOF_CHAP
-    echo
-}
-
-get_login_by_index() {
-    INDEX=$1
-    i=1
-    for login in $CLIENT_LOGINS; do
-        [ "$i" = "$INDEX" ] && echo "$login" && return
-        i=$((i + 1))
-    done
-    echo ""
-}
-
-start_l2tp() {
-    echo "[*] Запуск L2TP сервера..."
-    systemctl start "$L2TP_SERVICE"
-}
-
-stop_l2tp() {
-    echo "[*] Остановка L2TP сервера..."
-    systemctl stop "$L2TP_SERVICE"
-}
-
-restart_l2tp() {
-    echo "[*] Перезапуск L2TP сервера..."
-    systemctl restart "$L2TP_SERVICE"
+    grep -vE '^\s*#|^\s*$' "$CHAP_SECRETS" | awk '{printf "  %-20s %-20s\n", $1, $3}'
 }
 
 add_client() {
-    printf "  Введите логин: "
+    printf "Введите логин: "
     read LOGIN
-    if grep -q "^$LOGIN " "$CHAP_SECRETS"; then
-        echo "  ❌ Такой логин уже есть."
-    else
-        PASS=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c8)
-        echo "$LOGIN * $PASS *" >> "$CHAP_SECRETS"
-        echo "  ✅ Добавлен: $LOGIN | Пароль: $PASS"
-    fi
+    grep -q "^$LOGIN " "$CHAP_SECRETS" && echo "  ❌ Уже существует." && return
+    PASS=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c8)
+    echo "$LOGIN * $PASS *" >> "$CHAP_SECRETS"
+    echo "  ✅ Добавлен: $LOGIN | Пароль: $PASS"
 }
 
 delete_client() {
-    printf "  Введите номер клиента для удаления: "
-    read NUM
-    LOGIN=$(get_login_by_index "$NUM")
-    [ -z "$LOGIN" ] && echo "❌ Неверный номер." && return
+    printf "Введите логин для удаления: "
+    read LOGIN
     sed -i "/^$LOGIN\s\+/d" "$CHAP_SECRETS"
     echo "  ✅ Удалён: $LOGIN"
 }
 
 change_password() {
-    printf "  Введите номер клиента для смены пароля: "
-    read NUM
-    LOGIN=$(get_login_by_index "$NUM")
-    [ -z "$LOGIN" ] && echo "❌ Неверный номер." && return
+    printf "Введите логин для смены пароля: "
+    read LOGIN
     NEWPASS=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c8)
     sed -i "s|^$LOGIN\s\+\*\s\+\S\+\s\+\*|$LOGIN * $NEWPASS *|" "$CHAP_SECRETS"
-    echo "  ✅ Новый пароль для $LOGIN: $NEWPASS"
+    echo "  ✅ Новый пароль: $NEWPASS"
 }
 
 menu() {
     while true; do
+        echo
         print_status
         list_clients
         echo "===== МЕНЮ ====="
-        echo "1) Запуск сервера"
+        echo "1) Запуск"
         echo "2) Остановка"
         echo "3) Перезапуск"
         echo "4) Добавить клиента"
         echo "5) Удалить клиента"
         echo "6) Сменить пароль"
         echo "0) Выход"
-        printf "Выберите действие: "
+        printf "Выбор: "
         read CHOICE
         case "$CHOICE" in
-            1) start_l2tp ;;
-            2) stop_l2tp ;;
-            3) restart_l2tp ;;
+            1) systemctl start "$L2TP_SERVICE" ;;
+            2) systemctl stop "$L2TP_SERVICE" ;;
+            3) systemctl restart "$L2TP_SERVICE" ;;
             4) add_client ;;
             5) delete_client ;;
             6) change_password ;;
-            0) echo "Выход."; break ;;
+            0) break ;;
             *) echo "❌ Неверный выбор." ;;
         esac
     done
@@ -258,12 +205,13 @@ EOF
 chmod +x /etc/atlastunnel/manager.sh
 ln -sf /etc/atlastunnel/manager.sh /usr/local/bin/atlas
 
+echo
 echo "[✓] Установка завершена."
 echo
 echo "📡  Подключение к VPN:"
-echo "    Сервер IP: $VPN_PUBLIC_IP"
-echo "    Логин:     $VPN_USER"
-echo "    Пароль:    $VPN_PASS"
-echo "    PSK (ключ):$VPN_PSK"
+echo "    Сервер IP : $VPN_PUBLIC_IP"
+echo "    Логин     : $VPN_USER"
+echo "    Пароль    : $VPN_PASS"
+echo "    PSK (ключ): $VPN_PSK"
 echo
 echo "⚙ Менеджер клиентов: команда 'atlas'"
