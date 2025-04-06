@@ -3,14 +3,40 @@ set -e
 
 VPN_USER="vpnuser"
 VPN_PASS=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c8)
+VPN_PSK=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c16)
 VPN_LOCAL_IP="10.30.40.1"
 VPN_REMOTE_IP_RANGE="10.30.40.10-100"
+VPN_PUBLIC_IP=$(curl -s https://ipinfo.io/ip)
 
-echo "[*] Установка необходимых пакетов..."
+echo "[*] Установка пакетов..."
 apt-get update
 echo iptables-persistent iptables-persistent/autosave_v4 boolean true | debconf-set-selections
 echo iptables-persistent iptables-persistent/autosave_v6 boolean false | debconf-set-selections
-DEBIAN_FRONTEND=noninteractive apt-get install -y xl2tpd ppp iptables-persistent curl
+DEBIAN_FRONTEND=noninteractive apt-get install -y xl2tpd strongswan ppp iptables-persistent curl
+
+echo "[*] Настройка IPsec (strongSwan)..."
+cat > /etc/ipsec.conf <<EOF
+config setup
+    charondebug="all"
+    uniqueids=no
+
+conn L2TP-PSK
+    authby=secret
+    pfs=no
+    auto=add
+    keyexchange=ikev1
+    type=transport
+    left=%any
+    leftprotoport=17/1701
+    right=%any
+    rightprotoport=17/%any
+    ike=aes128-sha1-modp1024
+    esp=aes128-sha1
+EOF
+
+cat > /etc/ipsec.secrets <<EOF
+%any  %any  : PSK "$VPN_PSK"
+EOF
 
 echo "[*] Настройка xl2tpd..."
 mkdir -p /etc/xl2tpd
@@ -28,7 +54,7 @@ pppoptfile = /etc/ppp/options.l2tpd
 length bit = yes
 EOF
 
-echo "[*] Настройка ppp options..."
+echo "[*] Настройка PPP options..."
 mkdir -p /etc/ppp
 cat > /etc/ppp/options.l2tpd <<EOF
 require-mschap-v2
@@ -51,7 +77,7 @@ lcp-echo-failure 4
 lcp-echo-interval 30
 EOF
 
-echo "[*] Добавление VPN пользователя..."
+echo "[*] Добавление пользователя..."
 echo "$VPN_USER * $VPN_PASS *" >> /etc/ppp/chap-secrets
 
 echo "[*] Включение IP маршрутизации..."
@@ -79,7 +105,7 @@ echo "[*] Настройка systemd сервиса для xl2tpd..."
 cat > /etc/systemd/system/xl2tpd.service <<EOF
 [Unit]
 Description=Layer 2 Tunnelling Protocol Daemon (L2TP)
-After=network.target
+After=network.target ipsec.service
 
 [Service]
 ExecStart=/usr/sbin/xl2tpd -D
@@ -95,7 +121,10 @@ EOF
 systemctl daemon-reexec
 systemctl daemon-reload
 
-echo "[*] Включение и запуск L2TP сервиса..."
+echo "[*] Включение и запуск сервисов..."
+systemctl enable strongswan
+systemctl restart strongswan
+
 systemctl enable xl2tpd
 systemctl restart xl2tpd
 
@@ -227,7 +256,11 @@ chmod +x /etc/atlastunnel/manager.sh
 ln -sf /etc/atlastunnel/manager.sh /usr/local/bin/atlas
 
 echo "[✓] Установка завершена."
-echo "    IP сервера: $(curl -s https://ipinfo.io/ip)"
-echo "    Логин: $VPN_USER"
-echo "    Пароль: $VPN_PASS"
-echo "    Менеджер: atlas"
+echo " "
+echo "📡  Подключение к VPN:"
+echo "    Сервер IP: $VPN_PUBLIC_IP"
+echo "    Логин:     $VPN_USER"
+echo "    Пароль:    $VPN_PASS"
+echo "    PSK (ключ):$VPN_PSK"
+echo " "
+echo "⚙ Менеджер клиентов: команда 'atlas'"
