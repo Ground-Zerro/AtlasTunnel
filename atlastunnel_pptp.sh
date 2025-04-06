@@ -9,7 +9,10 @@ VPN_REMOTE_IP_RANGE="10.20.30.40-200"
 
 echo "[*] Установка необходимых пакетов..."
 apt-get update
-apt-get install -y pptpd iptables-persistent
+echo iptables-persistent iptables-persistent/autosave_v4 boolean true | debconf-set-selections
+echo iptables-persistent iptables-persistent/autosave_v6 boolean false | debconf-set-selections
+
+DEBIAN_FRONTEND=noninteractive apt-get install -y pptpd iptables-persistent
 
 echo "[*] Настройка /etc/pptpd.conf..."
 PPTPD_CONF="/etc/pptpd.conf"
@@ -244,6 +247,6 @@ ln -sf /etc/atlastunnel/manager.sh /usr/local/bin/atlas
 chmod +x /etc/atlastunnel/manager.sh
 
 echo "[✓] Установка и настройка завершены. Используйте:"
-echo "    IP сервера: IP=$(curl -s https://ipinfo.io/ip)"
+echo "    IP сервера: $(curl -s https://ipinfo.io/ip)"
 echo "    логин: $VPN_USER"
 echo "    пароль: $VPN_PASS"
