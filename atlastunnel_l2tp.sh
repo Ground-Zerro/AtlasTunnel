@@ -10,7 +10,6 @@ echo "[*] Установка пакетов..."
 apt-get update
 echo iptables-persistent iptables-persistent/autosave_v4 boolean true | debconf-set-selections
 echo iptables-persistent iptables-persistent/autosave_v6 boolean false | debconf-set-selections
-
 DEBIAN_FRONTEND=noninteractive apt-get install -y xl2tpd ppp iptables-persistent
 
 echo "[*] Настройка xl2tpd..."
@@ -76,11 +75,35 @@ iptables -A FORWARD -i eth0 -o ppp+ -j ACCEPT
 netfilter-persistent save
 systemctl enable netfilter-persistent
 
-echo "[*] Включение L2TP сервиса..."
+echo "[*] Подготовка /var/run/xl2tpd..."
+mkdir -p /var/run/xl2tpd
+touch /var/run/xl2tpd/l2tp-control
+
+echo "[*] Настройка systemd сервиса для xl2tpd..."
+cat > /etc/systemd/system/xl2tpd.service <<EOF
+[Unit]
+Description=Layer 2 Tunnelling Protocol Daemon (L2TP)
+After=network.target
+
+[Service]
+ExecStart=/usr/sbin/xl2tpd -D
+PIDFile=/run/xl2tpd/xl2tpd.pid
+ExecStartPre=/bin/mkdir -p /var/run/xl2tpd
+ExecStartPre=/bin/touch /var/run/xl2tpd/l2tp-control
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reexec
+systemctl daemon-reload
+
+echo "[*] Включение и запуск xl2tpd..."
 systemctl enable xl2tpd
 systemctl restart xl2tpd
 
-echo "[*] Установка L2TP Tunnel manager..."
+echo "[*] Установка L2TP Tunnel manager (atlas)..."
 mkdir -p /etc/atlastunnel
 cp /etc/ppp/chap-secrets /etc/atlastunnel/chap-secrets.backup
 
