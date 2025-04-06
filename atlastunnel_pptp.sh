@@ -218,7 +218,7 @@ menu() {
         echo
         print_status
         list_clients
-        echo "===== МЕНЮ ====="
+        echo "===== Меню Atlas PPTP ====="
         echo "1) Запустить PPTP сервер"
         echo "2) Остановить PPTP сервер"
         echo "3) Перезапустить PPTP сервер"
