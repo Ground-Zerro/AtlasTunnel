@@ -4,8 +4,8 @@ set -e
 
 VPN_USER="vpnuser"
 VPN_PASS="vpnpass"
-VPN_LOCAL_IP="192.168.18.1"
-VPN_REMOTE_IP_RANGE="192.168.18.100-200"
+VPN_LOCAL_IP="10.20.30.1"
+VPN_REMOTE_IP_RANGE="10.20.30.40-200"
 
 echo "[*] Установка необходимых пакетов..."
 apt-get update
@@ -32,7 +32,8 @@ refuse-pap
 refuse-chap
 refuse-mschap
 require-mschap-v2
-require-mppe-128
+nomppe
+noccp
 ms-dns 8.8.8.8
 ms-dns 1.1.1.1
 nobsdcomp
@@ -73,10 +74,12 @@ iptables -A FORWARD -i ppp+ -o eth0 -j ACCEPT
 iptables -C FORWARD -i eth0 -o ppp+ -j ACCEPT 2>/dev/null || \
 iptables -A FORWARD -i eth0 -o ppp+ -j ACCEPT
 
-echo "[*] Сохранение iptables..."
+echo "[*] Сохранение iptables и включение автозапуска..."
 netfilter-persistent save
+systemctl enable netfilter-persistent
+systemctl restart netfilter-persistent
 
-echo "[*] Перезапуск pptpd..."
+echo "[*] Включение и перезапуск pptpd..."
 systemctl enable pptpd
 systemctl restart pptpd
 
