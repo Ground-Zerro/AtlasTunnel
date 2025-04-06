@@ -3,7 +3,7 @@ set -e
 
 VPN_USER="vpnuser"
 VPN_PASS=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c8)
-VPN_PSK=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c5)
+VPN_PSK=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c16)
 VPN_LOCAL_IP="10.30.40.1"
 VPN_REMOTE_IP_RANGE="10.30.40.10-100"
 VPN_PUBLIC_IP=$(curl -s https://ipinfo.io/ip)
@@ -54,7 +54,6 @@ length bit = yes
 EOF
 
 echo "[*] Настройка PPP options..."
-mkdir -p /etc/ppp
 cat > /etc/ppp/options.l2tpd <<EOF
 require-mschap-v2
 refuse-pap
@@ -62,22 +61,22 @@ refuse-chap
 refuse-mschap
 nomppe
 noccp
+noauth
 ms-dns 8.8.8.8
 ms-dns 1.1.1.1
 asyncmap 0
 auth
-crtscts
 lock
 hide-password
 modem
-mtu 1400
-mru 1400
+mtu 1360
+mru 1360
 lcp-echo-failure 4
 lcp-echo-interval 30
 EOF
 
 echo "[*] Добавление пользователя..."
-echo "$VPN_USER * $VPN_PASS *" >> /etc/ppp/chap-secrets
+echo "\"$VPN_USER\" * $VPN_PASS *" >> /etc/ppp/chap-secrets
 
 echo "[*] Включение IP маршрутизации..."
 grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.conf || echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
@@ -134,72 +133,55 @@ mkdir -p /etc/atlastunnel
 cp /etc/ppp/chap-secrets /etc/atlastunnel/chap-secrets.backup
 cat << 'EOF' > /etc/atlastunnel/manager.sh
 #!/bin/sh
-L2TP_SERVICE="xl2tpd"
-CHAP_SECRETS="/etc/ppp/chap-secrets"
+CHAP="/etc/ppp/chap-secrets"
 
-print_status() {
-    echo "[*] Статус L2TP сервера:"
-    systemctl is-active "$L2TP_SERVICE" >/dev/null 2>&1 && echo "    СТАТУС: ✅ ЗАПУЩЕН" || echo "    СТАТУС: ❌ ОСТАНОВЛЕН"
+list() {
+  echo "[*] Клиенты:"
+  grep -vE '^\s*#|^\s*$' "$CHAP" | awk '{printf "  %-20s %-20s\n", $1, $3}'
 }
 
-list_clients() {
-    echo "[*] Список клиентов:"
-    grep -vE '^\s*#|^\s*$' "$CHAP_SECRETS" | awk '{printf "  %-20s %-20s\n", $1, $3}'
+add() {
+  printf "Логин: "
+  read LOGIN
+  grep -q "^\"$LOGIN\"" "$CHAP" && echo "❌ Уже есть." && return
+  PASS=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c8)
+  echo "\"$LOGIN\" * $PASS *" >> "$CHAP"
+  echo "✅ Добавлен: $LOGIN | $PASS"
 }
 
-add_client() {
-    printf "Введите логин: "
-    read LOGIN
-    grep -q "^$LOGIN " "$CHAP_SECRETS" && echo "  ❌ Уже существует." && return
-    PASS=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c8)
-    echo "$LOGIN * $PASS *" >> "$CHAP_SECRETS"
-    echo "  ✅ Добавлен: $LOGIN | Пароль: $PASS"
+del() {
+  printf "Удалить логин: "
+  read LOGIN
+  sed -i "/^\"$LOGIN\" /d" "$CHAP"
+  echo "✅ Удалён: $LOGIN"
 }
 
-delete_client() {
-    printf "Введите логин для удаления: "
-    read LOGIN
-    sed -i "/^$LOGIN\s\+/d" "$CHAP_SECRETS"
-    echo "  ✅ Удалён: $LOGIN"
+passwd() {
+  printf "Логин: "
+  read LOGIN
+  PASS=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c8)
+  sed -i "s|^\"$LOGIN\" .*|\"$LOGIN\" * $PASS *|" "$CHAP"
+  echo "✅ Новый пароль: $PASS"
 }
 
-change_password() {
-    printf "Введите логин для смены пароля: "
-    read LOGIN
-    NEWPASS=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c8)
-    sed -i "s|^$LOGIN\s\+\*\s\+\S\+\s\+\*|$LOGIN * $NEWPASS *|" "$CHAP_SECRETS"
-    echo "  ✅ Новый пароль: $NEWPASS"
-}
-
-menu() {
-    while true; do
-        echo
-        print_status
-        list_clients
-        echo "===== МЕНЮ ====="
-        echo "1) Запуск"
-        echo "2) Остановка"
-        echo "3) Перезапуск"
-        echo "4) Добавить клиента"
-        echo "5) Удалить клиента"
-        echo "6) Сменить пароль"
-        echo "0) Выход"
-        printf "Выбор: "
-        read CHOICE
-        case "$CHOICE" in
-            1) systemctl start "$L2TP_SERVICE" ;;
-            2) systemctl stop "$L2TP_SERVICE" ;;
-            3) systemctl restart "$L2TP_SERVICE" ;;
-            4) add_client ;;
-            5) delete_client ;;
-            6) change_password ;;
-            0) break ;;
-            *) echo "❌ Неверный выбор." ;;
-        esac
-    done
-}
-
-menu
+while true; do
+  echo; echo "===== Меню Atlas ====="
+  echo "1) Список"
+  echo "2) Добавить"
+  echo "3) Удалить"
+  echo "4) Новый пароль"
+  echo "0) Выход"
+  printf "Выбор: "
+  read x
+  case $x in
+    1) list ;;
+    2) add ;;
+    3) del ;;
+    4) passwd ;;
+    0) break ;;
+    *) echo "❌ Неверный выбор" ;;
+  esac
+done
 EOF
 
 chmod +x /etc/atlastunnel/manager.sh
