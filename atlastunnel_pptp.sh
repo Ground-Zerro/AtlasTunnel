@@ -12,7 +12,50 @@ apt-get update
 echo iptables-persistent iptables-persistent/autosave_v4 boolean true | debconf-set-selections
 echo iptables-persistent iptables-persistent/autosave_v6 boolean false | debconf-set-selections
 
-DEBIAN_FRONTEND=noninteractive apt-get install -y pptpd iptables-persistent
+UBUNTU_VER=$(lsb_release -rs | cut -d'.' -f1,2)
+
+echo "[*] Установка pptpd..."
+if dpkg --compare-versions "$UBUNTU_VER" gt "22.04"; then
+    echo "    Обнаружена Ubuntu $UBUNTU_VER — установка вручную: libssl1.1, ppp, bcrelay, pptpd."
+
+    echo "    Загрузка libssl1.1..."
+    wget -O /tmp/libssl1.1.deb "http://nova.clouds.archive.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2.24_amd64.deb"
+
+    echo "    Загрузка ppp..."
+    wget -O /tmp/ppp.deb "http://ru.archive.ubuntu.com/ubuntu/pool/main/p/ppp/ppp_2.4.9-1%2b1ubuntu3_amd64.deb"
+
+    echo "    Загрузка bcrelay..."
+    wget -O /tmp/bcrelay.deb "http://nova.clouds.archive.ubuntu.com/ubuntu/pool/main/p/pptpd/bcrelay_1.4.0-11build1_amd64.deb"
+
+    echo "    Загрузка pptpd..."
+    wget -O /tmp/pptpd.deb "http://ru.archive.ubuntu.com/ubuntu/pool/main/p/pptpd/pptpd_1.4.0-12build2_amd64.deb"
+
+    echo "    Установка libssl1.1..."
+    dpkg -i /tmp/libssl1.1.deb
+
+    echo "    Установка ppp..."
+    dpkg -i /tmp/ppp.deb
+
+    echo "    Установка bcrelay..."
+    dpkg -i /tmp/bcrelay.deb
+
+    echo "    Установка pptpd..."
+    dpkg -i /tmp/pptpd.deb
+
+    echo "    Устранение возможных зависимостей..."
+    apt-get install -f -y
+
+    echo "    Блокировка обновлений для установленных пакетов..."
+    apt-mark hold libssl1.1 ppp pptpd bcrelay
+else
+    echo "    Обнаружена Ubuntu $UBUNTU_VER — установка pptpd из репозитория."
+    DEBIAN_FRONTEND=noninteractive apt-get install -y pptpd
+fi
+
+echo "[*] Установка iptables-persistent..."
+echo iptables-persistent iptables-persistent/autosave_v4 boolean true | debconf-set-selections
+echo iptables-persistent iptables-persistent/autosave_v6 boolean false | debconf-set-selections
+DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent
 
 echo "[*] Настройка /etc/pptpd.conf..."
 PPTPD_CONF="/etc/pptpd.conf"
