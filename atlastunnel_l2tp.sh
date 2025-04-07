@@ -3,7 +3,6 @@ set -e
 
 VPN_USER="vpnuser"
 VPN_PASS=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c8)
-VPN_PSK=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c8)
 VPN_LOCAL_IP="10.30.40.1"
 VPN_REMOTE_IP_RANGE="10.30.40.10-100"
 VPN_PUBLIC_IP=$(curl -s https://ipinfo.io/ip)
@@ -12,30 +11,7 @@ echo "[*] Установка необходимых пакетов..."
 apt-get update
 echo iptables-persistent iptables-persistent/autosave_v4 boolean true | debconf-set-selections
 echo iptables-persistent iptables-persistent/autosave_v6 boolean false | debconf-set-selections
-DEBIAN_FRONTEND=noninteractive apt-get install -y xl2tpd strongswan ppp iptables-persistent curl
-
-echo "[*] Настройка IPsec (strongSwan)..."
-cat > /etc/ipsec.conf <<EOF
-config setup
-    charondebug="ike 1, knl 1, cfg 0"
-
-conn L2TP-PSK
-    authby=secret
-    pfs=no
-    auto=add
-    keyexchange=ikev1
-    type=transport
-    left=%any
-    leftprotoport=17/1701
-    right=%any
-    rightprotoport=17/%any
-    ike=aes128-sha1-modp1024
-    esp=aes128-sha1
-EOF
-
-cat > /etc/ipsec.secrets <<EOF
-%any  %any  : PSK "$VPN_PSK"
-EOF
+DEBIAN_FRONTEND=noninteractive apt-get install -y xl2tpd ppp iptables-persistent curl
 
 echo "[*] Настройка xl2tpd..."
 mkdir -p /etc/xl2tpd
@@ -109,7 +85,7 @@ echo "[*] Настройка systemd сервиса для xl2tpd..."
 cat > /etc/systemd/system/xl2tpd.service <<EOF
 [Unit]
 Description=Layer 2 Tunnelling Protocol Daemon (L2TP)
-After=network.target strongswan-starter.service
+After=network.target
 
 [Service]
 ExecStart=/usr/sbin/xl2tpd -D
@@ -122,11 +98,9 @@ Restart=on-failure
 WantedBy=multi-user.target
 EOF
 
-echo "[*] Активация сервисов..."
+echo "[*] Активация сервиса xl2tpd..."
 systemctl daemon-reexec
 systemctl daemon-reload
-systemctl enable strongswan-starter
-systemctl restart strongswan-starter
 systemctl enable xl2tpd
 systemctl restart xl2tpd
 
@@ -138,24 +112,16 @@ cat << 'EOF' > /etc/atlastunnel/manager.sh
 
 CHAP="/etc/ppp/chap-secrets"
 L2TP_SERVICE="xl2tpd"
-IPSEC_SERVICE="strongswan-starter"
-IPSEC_SECRET_FILE="/etc/ipsec.secrets"
 CLIENT_LOGINS=""
 
 get_public_ip() {
   curl -s https://ipinfo.io/ip
 }
 
-get_psk() {
-  grep -vE '^\s*#|^\s*$' "$IPSEC_SECRET_FILE" | awk -F'"' '{print $2}'
-}
-
 print_status() {
-  echo "[*] Статус L2TP/IPsec сервера:"
-  systemctl is-active "$IPSEC_SERVICE" >/dev/null 2>&1 && echo "    IPsec: ✅ ЗАПУЩЕН" || echo "    IPsec: ❌ ОСТАНОВЛЕН"
+  echo "[*] Статус L2TP сервера:"
   systemctl is-active "$L2TP_SERVICE" >/dev/null 2>&1 && echo "    L2TP : ✅ ЗАПУЩЕН" || echo "    L2TP : ❌ ОСТАНОВЛЕН"
   echo "    IP сервера: $(get_public_ip)"
-  echo "    PSK (ключ): $(get_psk)"
 }
 
 list_clients() {
@@ -246,22 +212,19 @@ change_password() {
 }
 
 start_l2tp() {
-  echo "[*] Запуск L2TP и IPsec..."
-  systemctl start "$IPSEC_SERVICE"
+  echo "[*] Запуск L2TP..."
   systemctl start "$L2TP_SERVICE"
   echo "✅ Запущено."
 }
 
 stop_l2tp() {
-  echo "[*] Остановка L2TP и IPsec..."
+  echo "[*] Остановка L2TP..."
   systemctl stop "$L2TP_SERVICE"
-  systemctl stop "$IPSEC_SERVICE"
   echo "🛑 Остановлено."
 }
 
 restart_l2tp() {
-  echo "[*] Перезапуск L2TP и IPsec..."
-  systemctl restart "$IPSEC_SERVICE"
+  echo "[*] Перезапуск L2TP..."
   systemctl restart "$L2TP_SERVICE"
   echo "🔄 Перезапущено."
 }
@@ -305,6 +268,5 @@ echo "📡  Подключение к VPN:"
 echo "    Сервер IP : $VPN_PUBLIC_IP"
 echo "    Логин     : $VPN_USER"
 echo "    Пароль    : $VPN_PASS"
-echo "    PSK (ключ): $VPN_PSK"
 echo
 echo "⚙ Менеджер клиентов: команда 'atlas'"
