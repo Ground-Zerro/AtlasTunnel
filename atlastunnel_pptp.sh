@@ -78,6 +78,8 @@ refuse-pap
 refuse-chap
 refuse-mschap
 require-mschap-v2
++mppe-128
++mppe-40
 nomppe
 noccp
 ms-dns 8.8.8.8
