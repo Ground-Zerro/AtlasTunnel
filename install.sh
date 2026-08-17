@@ -1,91 +1,58 @@
 #!/bin/bash
 
-set -e
+set -euo pipefail
 
-readonly GITHUB_REPO="Ground-Zerro/AtlasTunnel"
-readonly GITHUB_BRANCH="main"
-readonly GITHUB_RAW_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/${GITHUB_BRANCH}"
-
-readonly TEMP_DIR="/tmp/atlastunnel-install-$$"
+readonly REPO="Ground-Zerro/AtlasTunnel"
+readonly BRANCH="${ATLAS_BRANCH:-main}"
+readonly BASE="https://raw.githubusercontent.com/${REPO}/${BRANCH}/bin"
+readonly BIN_PATH="/usr/local/bin/atlas"
 
 log() { echo "[*] $*"; }
 ok()  { echo "[✓] $*"; }
-err() { echo "[✗] $*" >&2; }
-die() { err "$*"; exit 1; }
+die() { echo "[✗] $*" >&2; exit 1; }
 
-check_root() {
-    [ "$(id -u)" -eq 0 ] || die "Требуется root доступ. Запустите с sudo или от root."
-}
+[ "$(id -u)" -eq 0 ] || die "Требуется root доступ. Запустите через sudo."
 
-check_distro() {
-    local os_id
-    os_id=$(lsb_release -is 2>/dev/null | tr '[:upper:]' '[:lower:]')
-    [[ "$os_id" == "ubuntu" ]] || die "Поддерживается только Ubuntu"
-}
+case "$(uname -m)" in
+    x86_64)        ASSET="atlas-x86_64-linux" ;;
+    aarch64|arm64) ASSET="atlas-aarch64-linux" ;;
+    *)             die "Неподдерживаемая архитектура: $(uname -m)" ;;
+esac
 
-download_file() {
-    local url="$1"
-    local dest="$2"
+command -v curl >/dev/null 2>&1 || die "Требуется curl"
+command -v sha256sum >/dev/null 2>&1 || die "Требуется sha256sum"
 
-    if ! curl -fsSL "$url" -o "$dest"; then
-        die "Не удалось загрузить $url"
-    fi
-}
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
 
-main() {
-    echo ""
-    echo "============================================="
-    echo "  AtlasTunnel Installer"
-    echo "  Загрузка файлов с GitHub..."
-    echo "============================================="
-    echo ""
+log "Загрузка ${ASSET} из ветки ${BRANCH}..."
+curl -fsSL "${BASE}/${ASSET}" -o "${TMP}/atlas" \
+    || die "Не удалось загрузить ${BASE}/${ASSET}"
 
-    check_root
-    check_distro
+# Контрольная сумма обязательна: бинарник ставится в систему с правами root.
+log "Проверка контрольной суммы..."
+curl -fsSL "${BASE}/SHA256SUMS" -o "${TMP}/SHA256SUMS" \
+    || die "Не удалось загрузить SHA256SUMS"
 
-    log "Создание временной директории..."
-    mkdir -p "$TEMP_DIR/lib"
-    cd "$TEMP_DIR"
+EXPECTED=$(grep " ${ASSET}\$" "${TMP}/SHA256SUMS" | cut -d' ' -f1)
+[ -n "$EXPECTED" ] || die "В SHA256SUMS нет записи для ${ASSET}"
 
-    log "Загрузка главного скрипта..."
-    download_file "${GITHUB_RAW_URL}/atlastunnel.sh" "atlastunnel.sh"
+ACTUAL=$(sha256sum "${TMP}/atlas" | cut -d' ' -f1)
+[ "$EXPECTED" = "$ACTUAL" ] \
+    || die "Контрольная сумма не совпала: ожидалось ${EXPECTED}, получено ${ACTUAL}"
+ok "Контрольная сумма совпала"
 
-    log "Загрузка менеджера..."
-    download_file "${GITHUB_RAW_URL}/atlas-manager.sh" "atlas-manager.sh"
+# mv, а не install: переименование срабатывает даже когда старый atlas запущен.
+chmod 755 "${TMP}/atlas"
+mv -f "${TMP}/atlas" "$BIN_PATH"
+ok "Установлено: ${BIN_PATH} ($("$BIN_PATH" --version))"
 
-    log "Загрузка библиотек..."
-    download_file "${GITHUB_RAW_URL}/lib/lib-utils.sh" "lib/lib-utils.sh"
-    download_file "${GITHUB_RAW_URL}/lib/lib-system.sh" "lib/lib-system.sh"
-    download_file "${GITHUB_RAW_URL}/lib/lib-protocols.sh" "lib/lib-protocols.sh"
-    download_file "${GITHUB_RAW_URL}/lib/lib-manager.sh" "lib/lib-manager.sh"
-
-    ok "Все файлы загружены"
-
-    log "Установка прав на выполнение..."
-    chmod +x atlastunnel.sh atlas-manager.sh
-    chmod +x lib/*.sh
-
-    echo ""
-    echo "============================================="
-    echo "  Запуск установки AtlasTunnel..."
-    echo "============================================="
-    echo ""
-
-    ./atlastunnel.sh
-
-    local exit_code=$?
-
-    if [ $exit_code -eq 0 ]; then
-        echo ""
-        log "Очистка временных файлов..."
-        cd /
-        rm -rf "$TEMP_DIR"
-        ok "Установка завершена успешно!"
-    else
-        err "Установка завершилась с ошибкой (код: $exit_code)"
-        err "Временные файлы сохранены в: $TEMP_DIR"
-        exit $exit_code
-    fi
-}
-
-main "$@"
+echo
+if [ -e /dev/tty ]; then
+    log "Запуск установки протоколов..."
+    exec "$BIN_PATH" install
+else
+    echo "Терминал недоступен — запустите установку вручную:"
+    echo "  atlas install                                     интерактивный выбор"
+    echo "  atlas install --protocols pptp,l2tp-ipsec --yes   без интерфейса"
+fi
